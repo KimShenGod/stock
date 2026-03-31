@@ -1,0 +1,50 @@
+{
+    "folders": [
+        { 
+            "name": "核心代码", 
+            "path": "." 
+        }
+        // 不包含 node_modules、dist、build 等巨型目录
+    ],
+    "settings": {
+        "files.exclude": {
+            "**/node_modules": true,
+            "**/dist": true,
+            "**/build": true,
+            "**/.git": true,
+            "**/TDXdata": true,
+            "**/.vscode": true
+        },
+        "search.exclude": {
+            "**/node_modules": true,
+            "**/dist": true,
+            "**/build": true,
+            "**/.git": true,
+            "**/TDXdata": true,
+            "**/.vscode": true
+        },
+        
+        "files.watcherExclude": {
+            "**/__pycache__/**": true,
+            "**/venv/**": true,
+            "**/.venv/**": true,
+            "**/logs/**": true,
+            "**/temp/**": true,
+            "**/TDXdata": true,
+            "**/.git": true
+        },
+        "workbench.colorCustomizations": {
+            "activityBar.background": "#033333",
+            "titleBar.activeBackground": "#054848",
+            "titleBar.activeForeground": "#E9FEFE",
+            "titleBar.inactiveBackground": "#033333",
+            "titleBar.inactiveForeground": "#E9FEFE",
+            "statusBar.background": "#033333",
+            "statusBar.foreground": "#E9FEFE",
+            "statusBar.debuggingBackground": "#033333",
+            "statusBar.debuggingForeground": "#E9FEFE",
+            "statusBar.noFolderBackground": "#033333",
+            "statusBar.noFolderForeground": "#E9FEFE"
+        }
+    }
+}

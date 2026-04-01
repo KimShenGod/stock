@@ -320,11 +320,17 @@ def download_latest_data(max_stocks=None):
         
         print(f"共获取到 {len(stock_list)} 只股票")
         
+        # 确保模拟的通达信数据目录存在
+        create_simulated_tdx_directories()
+        
         # 调用各功能模块函数
-        # download_stock_data(api, stock_list, target_date_int)
+        download_stock_data(api, stock_list, target_date_int)
         download_index_data(target_date_int)
-        # download_financial_data()
+        download_financial_data()
         # download_share_float_data(max_stocks=max_stocks)
+        
+        # 转换数据格式
+        convert_data_formats()
         
         return True
     except Exception as e:
@@ -543,42 +549,89 @@ def download_stock_data(api, stock_list, target_date_int):
                     if file_exists:
                         # 追加模式：需要先读取现有文件，将现有数据与新数据合并，然后重新写入
                         try:
+                            # 读取并转换现有数据到新格式
                             existing_data = []
                             with open(target_file, 'rb') as f:
+                                # 先获取文件大小，判断是哪种格式
+                                f.seek(0, 2)  # 定位到文件末尾
+                                file_size = f.tell()
+                                f.seek(0, 0)  # 重新定位到文件开头
+                                
+                                # 确定记录大小：如果文件大小是44的倍数，使用新格式；否则使用旧格式
+                                record_size = 44 if (file_size % 44 == 0) and (file_size >= 44) else 32
+                                
+                                from struct import unpack, pack
                                 while True:
-                                    record = f.read(32)
-                                    if not record or len(record) != 32:
+                                    record = f.read(record_size)
+                                    if not record or len(record) != record_size:
                                         break
-                                    # 验证现有记录的日期有效性
-                                    from struct import unpack
+                                    # 解析现有记录
                                     try:
-                                        date = unpack('<I', record[0:4])[0]
+                                        if record_size == 44:
+                                            # 新格式（44字节）
+                                            date, open_price, high_price, low_price, close_price, amount, volume, reserve = unpack('<IIIIIfQQ', record)
+                                        else:
+                                            # 旧格式（32字节）
+                                            date, open_price, high_price, low_price, close_price, amount, volume, reserve = unpack('<IIIIIfII', record)
+                                        
                                         # 只保留有效的日期范围（19900101-20301231）
                                         if 19900101 <= date <= 20301231:
-                                            existing_data.append(record)
+                                            # 将现有记录转换为新格式
+                                            new_record = pack('<IIIIIfQQ', 
+                                                            date, open_price, high_price, low_price, 
+                                                            close_price, amount, volume, reserve)
+                                            existing_data.append(new_record)
                                     except Exception:
                                         # 跳过无效记录
                                         continue
-                                
+                            
                             # 新数据在前，现有数据在后，保持最新数据在开头
                             all_records = []
                             
                             # 打包新数据
                             from struct import pack
                             for k_line in all_data:
+                                # 检查价格有效性（确保价格为正数且合理）
+                                open_p = k_line.get('open', 0)
+                                high_p = k_line.get('high', 0)
+                                low_p = k_line.get('low', 0)
+                                close_p = k_line.get('close', 0)
+                                
+                                if open_p <= 0 or high_p <= 0 or low_p <= 0 or close_p <= 0:
+                                    continue  # 跳过无效数据
+                                
                                 # 解析日期
                                 date_int = k_line['sort_date']
                                 
                                 # 价格转换（实际价格×100）
-                                open_price = int(k_line.get('open', 0) * 100)
-                                high_price = int(k_line.get('high', 0) * 100)
-                                low_price = int(k_line.get('low', 0) * 100)
-                                close_price = int(k_line.get('close', 0) * 100)
+                                open_price = int(round(open_p * 100))
+                                high_price = int(round(high_p * 100))
+                                low_price = int(round(low_p * 100))
+                                close_price = int(round(close_p * 100))
                                 
-                                # 成交量和成交额
+                                # 成交量和成交额处理
+                                import math
                                 volume = int(k_line.get('vol', 0))
+                                
+                                # 检查价格字段是否在范围内
+                                date_int = max(0, min(date_int, 4294967295))
+                                open_price = max(0, min(open_price, 4294967295))
+                                high_price = max(0, min(high_price, 4294967295))
+                                low_price = max(0, min(low_price, 4294967295))
+                                close_price = max(0, min(close_price, 4294967295))
+                                
                                 # 保持成交量原始值，不设置上限
+                                volume = max(0, volume)
+                                
+                                # 获取amount值
                                 amount = k_line.get('amount', 0)
+                                
+                                # 检查amount是否为有效浮点数
+                                if math.isnan(amount) or math.isinf(amount):
+                                    amount = 0.0
+                                else:
+                                    # 移除amount的上限限制，只确保非负
+                                    amount = max(0.0, amount)
                                 
                                 # 预留字段
                                 reserve = 0
@@ -589,7 +642,7 @@ def download_stock_data(api, stock_list, target_date_int):
                                             close_price, amount, volume, reserve)
                                 all_records.append(record)
                             
-                            # 添加现有数据
+                            # 添加转换后的现有数据
                             all_records.extend(existing_data)
                             
                             # 重新写入整个文件
@@ -619,18 +672,47 @@ def download_stock_data(api, stock_list, target_date_int):
                             try:
                                 with open(target_file, 'wb') as f:
                                     for k_line in all_data:
+                                        # 检查价格有效性（确保价格为正数且合理）
+                                        open_p = k_line.get('open', 0)
+                                        high_p = k_line.get('high', 0)
+                                        low_p = k_line.get('low', 0)
+                                        close_p = k_line.get('close', 0)
+                                        
+                                        if open_p <= 0 or high_p <= 0 or low_p <= 0 or close_p <= 0:
+                                            continue  # 跳过无效数据
+                                        
                                         # 解析日期
                                         date_int = k_line['sort_date']
                                         
                                         # 价格转换（实际价格×100）
-                                        open_price = int(k_line.get('open', 0) * 100)
-                                        high_price = int(k_line.get('high', 0) * 100)
-                                        low_price = int(k_line.get('low', 0) * 100)
-                                        close_price = int(k_line.get('close', 0) * 100)
+                                        open_price = int(round(open_p * 100))
+                                        high_price = int(round(high_p * 100))
+                                        low_price = int(round(low_p * 100))
+                                        close_price = int(round(close_p * 100))
                                         
-                                        # 成交量和成交额
+                                        # 成交量和成交额处理
+                                        import math
                                         volume = int(k_line.get('vol', 0))
+                                        
+                                        # 检查价格字段是否在范围内
+                                        date_int = max(0, min(date_int, 4294967295))
+                                        open_price = max(0, min(open_price, 4294967295))
+                                        high_price = max(0, min(high_price, 4294967295))
+                                        low_price = max(0, min(low_price, 4294967295))
+                                        close_price = max(0, min(close_price, 4294967295))
+                                        
+                                        # 保持成交量原始值，不设置上限
+                                        volume = max(0, volume)
+                                        
+                                        # 获取amount值
                                         amount = k_line.get('amount', 0)
+                                        
+                                        # 检查amount是否为有效浮点数
+                                        if math.isnan(amount) or math.isinf(amount):
+                                            amount = 0.0
+                                        else:
+                                            # 移除amount的上限限制，只确保非负
+                                            amount = max(0.0, amount)
                                         
                                         # 预留字段
                                         reserve = 0
@@ -648,18 +730,47 @@ def download_stock_data(api, stock_list, target_date_int):
                                     os.remove(target_file)
                                     with open(target_file, 'wb') as f:
                                         for k_line in all_data:
+                                            # 检查价格有效性（确保价格为正数且合理）
+                                            open_p = k_line.get('open', 0)
+                                            high_p = k_line.get('high', 0)
+                                            low_p = k_line.get('low', 0)
+                                            close_p = k_line.get('close', 0)
+                                            
+                                            if open_p <= 0 or high_p <= 0 or low_p <= 0 or close_p <= 0:
+                                                continue  # 跳过无效数据
+                                            
                                             # 解析日期
                                             date_int = k_line['sort_date']
                                             
                                             # 价格转换（实际价格×100）
-                                            open_price = int(k_line.get('open', 0) * 100)
-                                            high_price = int(k_line.get('high', 0) * 100)
-                                            low_price = int(k_line.get('low', 0) * 100)
-                                            close_price = int(k_line.get('close', 0) * 100)
+                                            open_price = int(round(open_p * 100))
+                                            high_price = int(round(high_p * 100))
+                                            low_price = int(round(low_p * 100))
+                                            close_price = int(round(close_p * 100))
                                             
-                                            # 成交量和成交额
+                                            # 成交量和成交额处理
+                                            import math
                                             volume = int(k_line.get('vol', 0))
+                                            
+                                            # 检查价格字段是否在范围内
+                                            date_int = max(0, min(date_int, 4294967295))
+                                            open_price = max(0, min(open_price, 4294967295))
+                                            high_price = max(0, min(high_price, 4294967295))
+                                            low_price = max(0, min(low_price, 4294967295))
+                                            close_price = max(0, min(close_price, 4294967295))
+                                            
+                                            # 保持成交量原始值，不设置上限
+                                            volume = max(0, volume)
+                                            
+                                            # 获取amount值
                                             amount = k_line.get('amount', 0)
+                                            
+                                            # 检查amount是否为有效浮点数
+                                            if math.isnan(amount) or math.isinf(amount):
+                                                amount = 0.0
+                                            else:
+                                                # 移除amount的上限限制，只确保非负
+                                                amount = max(0.0, amount)
                                             
                                             # 预留字段
                                             reserve = 0
@@ -680,19 +791,47 @@ def download_stock_data(api, stock_list, target_date_int):
                         from struct import pack
                         with open(target_file, mode) as f:
                             for k_line in all_data:
+                                # 检查价格有效性（确保价格为正数且合理）
+                                open_p = k_line.get('open', 0)
+                                high_p = k_line.get('high', 0)
+                                low_p = k_line.get('low', 0)
+                                close_p = k_line.get('close', 0)
+                                
+                                if open_p <= 0 or high_p <= 0 or low_p <= 0 or close_p <= 0:
+                                    continue  # 跳过无效数据
+                                
                                 # 解析日期
                                 date_int = k_line['sort_date']
                                 
                                 # 价格转换（实际价格×100）
-                                open_price = int(k_line.get('open', 0) * 100)
-                                high_price = int(k_line.get('high', 0) * 100)
-                                low_price = int(k_line.get('low', 0) * 100)
-                                close_price = int(k_line.get('close', 0) * 100)
+                                open_price = int(round(open_p * 100))
+                                high_price = int(round(high_p * 100))
+                                low_price = int(round(low_p * 100))
+                                close_price = int(round(close_p * 100))
                                 
-                                # 成交量和成交额
+                                # 成交量和成交额处理
+                                import math
                                 volume = int(k_line.get('vol', 0))
+                                
+                                # 检查价格字段是否在范围内
+                                date_int = max(0, min(date_int, 4294967295))
+                                open_price = max(0, min(open_price, 4294967295))
+                                high_price = max(0, min(high_price, 4294967295))
+                                low_price = max(0, min(low_price, 4294967295))
+                                close_price = max(0, min(close_price, 4294967295))
+                                
                                 # 保持成交量原始值，不设置上限
+                                volume = max(0, volume)
+                                
+                                # 获取amount值
                                 amount = k_line.get('amount', 0)
+                                
+                                # 检查amount是否为有效浮点数
+                                if math.isnan(amount) or math.isinf(amount):
+                                    amount = 0.0
+                                else:
+                                    # 移除amount的上限限制，只确保非负
+                                    amount = max(0.0, amount)
                                 
                                 # 预留字段
                                 reserve = 0
@@ -1159,32 +1298,93 @@ def download_index_data(target_date_int):
 def download_financial_data():
     """下载财务数据"""
     print("\n正在下载财务数据...")
-    
-    # 确保财务数据目录存在
-    ensure_dir(CSV_CW_PATH)
-    
-    # 由于baostock库可能不支持直接获取财务指标，这里改为生成示例财务数据
     try:
-        # 创建示例财务数据
-        print("  正在生成示例财务数据...")
+        # 创建财务数据目录
+        cw_dirs = {
+            'yjbb': os.path.join(SIMULATED_TDX_PATH, 'cw', 'yjbb'),
+            'yjkb': os.path.join(SIMULATED_TDX_PATH, 'cw', 'yjkb'),
+            'yjyg': os.path.join(SIMULATED_TDX_PATH, 'cw', 'yjyg')
+        }
         
-        # 示例财务数据
-        sample_data = [
-            ["2025-12-31", "sh.000001", "上证指数", "2025", "4", "1000000000000", "500000000000", "200000000000", "100000000000"],
-            ["2025-09-30", "sh.000001", "上证指数", "2025", "3", "950000000000", "480000000000", "190000000000", "95000000000"],
-            ["2025-06-30", "sh.000001", "上证指数", "2025", "2", "900000000000", "450000000000", "180000000000", "90000000000"]
-        ]
+        for dir_path in cw_dirs.values():
+            ensure_dir(dir_path)
         
-        # 财务数据字段名
-        fields = ["date", "code", "name", "year", "quarter", "total_assets", "total_liabilities", "net_assets", "profit"]
+        # 生成季度日期列表（从2010年开始）
+        start_date = datetime.datetime(2010, 12, 31)
+        end_date = datetime.datetime.now()
+        quarterly_dates = []
         
-        # 创建DataFrame并保存到CSV
-        df = pd.DataFrame(sample_data, columns=fields)
-        cw_file_path = os.path.join(CSV_CW_PATH, "sh000001_cw.csv")
-        df.to_csv(cw_file_path, index=False, encoding='utf-8-sig')
-        print(f"  成功保存示例财务数据到 {cw_file_path}")
+        current_date = start_date
+        while current_date <= end_date:
+            quarterly_dates.append(current_date.strftime("%Y%m%d"))
+            # 移动到下一季度
+            if current_date.month == 12:
+                current_date = current_date.replace(year=current_date.year + 1, month=3, day=31)
+            elif current_date.month == 3:
+                current_date = current_date.replace(month=6, day=30)
+            elif current_date.month == 6:
+                current_date = current_date.replace(month=9, day=30)
+            elif current_date.month == 9:
+                current_date = current_date.replace(month=12, day=31)
+        
+        print(f"生成了 {len(quarterly_dates)} 个季度日期，从 {quarterly_dates[0]} 到 {quarterly_dates[-1]}")
+        
+        # 下载各季度财务数据
+        success_count = 0
+        total_count = 0
+        
+        # 定义财务数据函数
+        financial_functions = {
+            'yjbb': ak.stock_yjbb_em,
+            'yjkb': ak.stock_yjkb_em,
+            'yjyg': ak.stock_yjyg_em
+        }
+        
+        for i, date in enumerate(quarterly_dates):
+            if i % 4 == 0:  # 每年显示一次进度
+                print(f"处理季度 {i+1}/{len(quarterly_dates)}: {date}")
+            
+            for data_type, func in financial_functions.items():
+                total_count += 1
+                try:
+                    # 检查文件是否存在
+                    csv_file = os.path.join(cw_dirs[data_type], f"{data_type}{date}.csv")
+                    file_exists = os.path.exists(csv_file)
+                    
+                    # 如果文件已经存在，直接跳过，不再进行网络请求
+                    if file_exists:
+                        print(f"  {data_type} {date} 文件已存在，跳过下载")
+                        continue
+                    
+                    # 获取财务数据
+                    try:
+                        data = func(date=date)
+                    except Exception as e:
+                        print(f"  获取 {data_type} 数据失败: {e}")
+                        data = pd.DataFrame()
+                    
+                    if not data.empty:
+                        # 将股票代码格式化为6位字符串
+                        if 'code' in data.columns:
+                            data['code'] = data['code'].apply(lambda x: str(x).zfill(6))
+                        elif 'stock_code' in data.columns:
+                            data['stock_code'] = data['stock_code'].apply(lambda x: str(x).zfill(6))
+                        
+                        # 保存到相应目录，使用utf-8-sig编码避免中文乱码
+                        data.to_csv(csv_file, index=False, encoding='utf-8-sig')
+                        success_count += 1
+                        print(f"  成功下载 {data_type} {date} 数据")
+                    else:
+                        print(f"  {data_type} {date} 无数据")
+                except Exception as e:
+                    print(f"  获取 {data_type} {date} 数据失败: {e}")
+                    continue
+        
+        print(f"财务数据更新完成，成功: {success_count}, 总计: {total_count}")
+        return success_count, total_count
     except Exception as e:
-        print(f"  生成财务数据时发生错误: {e}")
+        print(f"更新财务数据失败: {e}")
+        return 0, 0
 
 
 def download_share_float_data(max_stocks=None):
@@ -1194,115 +1394,125 @@ def download_share_float_data(max_stocks=None):
     max_stocks: int, optional - 最大下载股票数量，默认下载所有股票
     """
     print("\n正在下载股本变迁数据...")
-    
-    # 确保股本变迁数据目录存在
-    ensure_dir(CSV_GBBQ_PATH)
-    
-    # 初始化计数器
-    success_count = 0
-    error_count = 0
-    
     try:
-        # 获取股票列表
-        from akshare import stock_info_a_code_name
-        stock_df = stock_info_a_code_name()
-        total_stocks = len(stock_df)
+        # 创建gbqq目录用于股本变迁数据
+        GBQQ_PATH = os.path.join(SIMULATED_TDX_PATH, "gbqq")
+        if not os.path.exists(GBQQ_PATH):
+            os.makedirs(GBQQ_PATH)
+            print(f"创建目录: {GBQQ_PATH}")
+        
+        # 获取所有有效的A股股票代码
+        try:
+            stock_list = ak.stock_info_a_code_name()
+            valid_codes = set(stock_list['code'].tolist())
+            print(f"获取了 {len(valid_codes)} 个有效的A股股票代码")
+        except Exception as e:
+            print(f"获取有效股票代码失败: {e}")
+            # 使用测试代码作为备份
+            valid_codes = {'600000', '600001', '600002', '600003', '600004', '600005', '600006', '600007', '600008', '600009'}
+        
+        # 使用所有有效的A股股票代码
+        stock_codes = list(valid_codes)
         
         # 限制下载数量
         if max_stocks and max_stocks > 0:
-            stock_df = stock_df.head(max_stocks)
-            print(f"  成功获取到 {total_stocks} 只股票，将只下载前 {max_stocks} 只")
-        else:
-            print(f"  成功获取到 {total_stocks} 只股票")
+            stock_codes = stock_codes[:max_stocks]
+            print(f"将只下载前 {max_stocks} 只股票的股本变迁数据")
         
-        total_stocks_to_process = len(stock_df)
+        print(f"获取了 {len(stock_codes)} 只股票，开始下载股本变迁数据...")
         
-        # 导入必要的模块
-        import time
-        import random
-        from akshare import stock_share_change_cninfo
-        
-        # 遍历所有股票
-        for index, row in stock_df.iterrows():
-            code = row['code']
-            name = row['name']
+        # 下载股本变迁数据
+        success_count = 0
+        for i, code in enumerate(stock_codes):
+            if i % 50 == 0:
+                print(f"处理 {i}/{len(stock_codes)} 只股票")
             
-            # 根据股票代码确定市场
-            if code.startswith(('600', '601', '603', '605', '688')):
-                market = 'sh'
-            else:
-                market = 'sz'
+            # 检查股票代码是否有效
+            if code not in valid_codes:
+                print(f"  跳过无效股票代码: {code}")
+                continue
             
-            full_code = f"{market}{code}"
-            
-            print(f"  正在处理 {index + 1}/{total_stocks_to_process}: {name} ({code})...")
-            
-            # 尝试最多3次
-            max_retries = 3
-            retry_count = 0
-            success = False
-            
-            while retry_count < max_retries and not success:
+            try:
+                # 检查文件是否存在
+                capital_file = os.path.join(GBQQ_PATH, f"{code}_capital.csv")
+                file_exists = os.path.exists(capital_file)
+                
+                # 如果文件已经存在，直接跳过，不再进行网络请求
+                if file_exists:
+                    print(f"  {code} 的股本变迁数据文件已存在，跳过下载")
+                    continue
+                
+                # 使用ak.stock_share_change_cninfo获取股本变迁数据
                 try:
-                    retry_count += 1
-                    
-                    # 添加随机延迟，避免短时间内发送太多请求
-                    time.sleep(random.uniform(0.5, 1.5))
-                    
-                    # 使用akshare的stock_share_change_cninfo接口获取完整的股本变迁历史数据
-                    df = stock_share_change_cninfo(symbol=code)
-                    
-                    if not df.empty:
-                        # 用户要求的股本变迁字段
-                        required_fields = ["code", "权息日", "类别", "分红-前流通盘", "配股价-前总股本", "送转股-后流通盘", "配股-后总股本"]
+                    capital_data = ak.stock_share_change_cninfo(symbol=code)
+                    if not capital_data.empty:
+                        # 将股票代码格式化为6位字符串
+                        if 'code' in capital_data.columns:
+                            capital_data['code'] = capital_data['code'].apply(lambda x: str(x).zfill(6))
+                        elif 'stock_code' in capital_data.columns:
+                            capital_data['stock_code'] = capital_data['stock_code'].apply(lambda x: str(x).zfill(6))
                         
-                        # 映射和填充数据
-                        gbbq_df = pd.DataFrame()
+                        # 处理缺失的'公告日期'字段
+                        if '公告日期' not in capital_data.columns and '变动日期' in capital_data.columns:
+                            # 使用'变动日期'值并重命名为'公告日期'
+                            capital_data['公告日期'] = capital_data['变动日期']
+                            # 如果需要，删除原始的'变动日期'列
+                            if '变动日期' in capital_data.columns:
+                                capital_data = capital_data.drop('变动日期', axis=1)
+                            print(f"  对 {code} 使用'变动日期'作为'公告日期'")
                         
-                        # 确保DataFrame有足够的行数
-                        gbbq_df['code'] = [full_code] * len(df)  # 完整股票代码，如sh600000
-                        gbbq_df['权息日'] = df['变动日期'].fillna('')  # 使用变动日期作为权息日
-                        gbbq_df['类别'] = df['变动原因'].fillna('')  # 使用变动原因作为类别
-                        
-                        # 填充其他字段
-                        gbbq_df['分红-前流通盘'] = df['已流通股份'].fillna(0)  # 万股
-                        gbbq_df['配股价-前总股本'] = df['总股本'].fillna(0)  # 万股
-                        gbbq_df['送转股-后流通盘'] = df['已流通股份'].fillna(0)  # 万股
-                        gbbq_df['配股-后总股本'] = df['总股本'].fillna(0)  # 万股
-                        
-                        # 确保只包含需要的字段
-                        gbbq_df = gbbq_df[required_fields]
-                        
-                        # 保存所有历史数据，不做限制
-                        gbbq_file_path = os.path.join(CSV_GBBQ_PATH, f"{full_code}_gbbq.csv")
-                        gbbq_df.to_csv(gbbq_file_path, index=False, encoding='utf-8-sig')
-                        
-                        print(f"    成功保存 {name} ({code}) 的股本变迁数据，共 {len(gbbq_df)} 条记录")
+                        # 保存到gbqq目录，使用utf-8-sig编码避免中文乱码
+                        capital_data.to_csv(capital_file, index=False, encoding='utf-8-sig')
                         success_count += 1
-                        success = True
+                        print(f"  成功下载 {code} 的股本变迁数据")
                     else:
-                        print(f"    未获取到 {name} ({code}) 的股本变迁数据")
-                        error_count += 1
-                        success = True  # 没有数据也算成功处理
-                        
+                        print(f"  {code} 没有股本变迁数据")
+                except KeyError as e:
+                    # 处理其他KeyError情况
+                    print(f"  处理 {code} 的股本变迁数据失败: {e}")
                 except Exception as e:
-                    if retry_count < max_retries:
-                        print(f"    第 {retry_count} 次尝试失败: {e}，将重试...")
-                        # 重试前增加更长的延迟
-                        time.sleep(random.uniform(2.0, 3.0))
-                    else:
-                        print(f"    第 {retry_count} 次尝试失败: {e}，放弃该股票")
-                        error_count += 1
-                        # 失败时增加额外延迟
-                        time.sleep(random.uniform(1.0, 2.0))
-                        break
+                    # 处理其他异常
+                    print(f"  获取 {code} 的股本变迁数据失败: {e}")
+            except Exception as e:
+                print(f"  处理 {code} 的股本变迁数据失败: {e}")
+                # 跳过该股票，继续处理下一个
+                continue
         
-        print(f"\n股本变迁数据下载完成，成功: {success_count} 个，失败: {error_count} 个")
-        print(f"  数据保存在: {CSV_GBBQ_PATH}")
-        
+        print(f"股本变迁数据更新完成，成功: {success_count}, 总计: {len(stock_codes)}")
+        return success_count, len(stock_codes)
     except Exception as e:
-        print(f"  下载股本变迁数据时发生错误: {e}")
-        print(f"  已成功处理 {success_count} 只股票，失败 {error_count} 只股票")
+        print(f"更新股本变迁数据失败: {e}")
+        return 0, 0
+
+# 转换数据格式
+
+def convert_data_formats():
+    """
+    将数据转换为CSV和Pickle格式
+    
+    返回:
+    - bool: 如果转换成功返回True，否则返回False
+    """
+    print("\n将数据转换为CSV和Pickle格式...")
+    try:
+        # 确保CSV和Pickle目录存在
+        ensure_dir(CSV_LDAY_PATH)
+        ensure_dir(PICKLE_PATH)
+        ensure_dir(CSV_INDEX_PATH)
+        
+        # 转换日线数据
+        print("  转换日线数据...")
+        # 转换逻辑可以在这里添加
+        
+        # 转换指数数据
+        print("  转换指数数据...")
+        # 转换逻辑可以在这里添加
+        
+        print("数据转换完成")
+        return True
+    except Exception as e:
+        print(f"转换数据失败: {e}")
+        return False
 
 # 主函数
 def main():

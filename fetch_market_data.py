@@ -388,26 +388,19 @@ def download_stock_data(api, stock_list, target_date_int):
                             f.seek(0, 2)  # 定位到文件末尾
                             file_size = f.tell()
                             if file_size >= 32:
-                                # 读取文件开头的第一条记录（最新数据）
-                                f.seek(0, 0)  # 定位到文件开头
-                                # 先读取44字节，支持新格式
-                                first_record = f.read(44)
+                                # 固定使用32字节的格式
+                                record_size = 32
+                                # 读取文件末尾的最后一条记录（最新数据）
+                                f.seek(file_size - record_size, 0)  # 定位到最后一条记录的开始位置
+                                # 读取最后一条记录
+                                last_record = f.read(record_size)
                                 from struct import unpack
                                 try:
-                                    # 先尝试用新格式（44字节）
-                                    if len(first_record) >= 44:
-                                        date = unpack('<IIIIIfQQ', first_record)[0]  # 读取日期字段
-                                    else:
-                                        # 如果数据不足44字节，重新读取32字节，尝试旧格式
-                                        f.seek(0, 0)
-                                        first_record = f.read(32)
-                                        if len(first_record) >= 32:
-                                            date = unpack('<IIIIIfII', first_record)[0]  # 读取日期字段
-                                        else:
-                                            raise ValueError("记录长度不足")
+                                    # 固定使用32字节格式读取
+                                    date = unpack('<IIIIIfII', last_record)[0]  # 读取日期字段
                                 except Exception as e:
-                                    # 如果两种格式都失败，尝试只读取日期字段（前4字节）
-                                    date = unpack('<I', first_record[0:4])[0]
+                                    # 如果格式失败，尝试只读取日期字段（前4字节）
+                                    date = unpack('<I', last_record[0:4])[0]
                                 
                                 # 验证日期有效性（19900101-20301231）
                                 if 19900101 <= date <= 20301231:
@@ -549,16 +542,11 @@ def download_stock_data(api, stock_list, target_date_int):
                     if file_exists:
                         # 追加模式：需要先读取现有文件，将现有数据与新数据合并，然后重新写入
                         try:
-                            # 读取并转换现有数据到新格式
+                            # 读取现有数据，固定使用32字节格式
                             existing_data = []
                             with open(target_file, 'rb') as f:
-                                # 先获取文件大小，判断是哪种格式
-                                f.seek(0, 2)  # 定位到文件末尾
-                                file_size = f.tell()
-                                f.seek(0, 0)  # 重新定位到文件开头
-                                
-                                # 确定记录大小：如果文件大小是44的倍数，使用新格式；否则使用旧格式
-                                record_size = 44 if (file_size % 44 == 0) and (file_size >= 44) else 32
+                                # 固定使用32字节的格式
+                                record_size = 32
                                 
                                 from struct import unpack, pack
                                 while True:
@@ -567,20 +555,16 @@ def download_stock_data(api, stock_list, target_date_int):
                                         break
                                     # 解析现有记录
                                     try:
-                                        if record_size == 44:
-                                            # 新格式（44字节）
-                                            date, open_price, high_price, low_price, close_price, amount, volume, reserve = unpack('<IIIIIfQQ', record)
-                                        else:
-                                            # 旧格式（32字节）
-                                            date, open_price, high_price, low_price, close_price, amount, volume, reserve = unpack('<IIIIIfII', record)
+                                        # 固定使用32字节格式
+                                        date, open_price, high_price, low_price, close_price, amount, volume, reserve = unpack('<IIIIIfII', record)
                                         
                                         # 只保留有效的日期范围（19900101-20301231）
                                         if 19900101 <= date <= 20301231:
-                                            # 将现有记录转换为新格式
-                                            new_record = pack('<IIIIIfQQ', 
+                                            # 保持32字节格式
+                                            existing_record = pack('<IIIIIfII', 
                                                             date, open_price, high_price, low_price, 
                                                             close_price, amount, volume, reserve)
-                                            existing_data.append(new_record)
+                                            existing_data.append(existing_record)
                                     except Exception:
                                         # 跳过无效记录
                                         continue
@@ -620,7 +604,7 @@ def download_stock_data(api, stock_list, target_date_int):
                                 low_price = max(0, min(low_price, 4294967295))
                                 close_price = max(0, min(close_price, 4294967295))
                                 
-                                # 保持成交量原始值，不设置上限
+                                # 保持成交量原始值，只确保非负
                                 volume = max(0, volume)
                                 
                                 # 获取amount值
@@ -630,19 +614,19 @@ def download_stock_data(api, stock_list, target_date_int):
                                 if math.isnan(amount) or math.isinf(amount):
                                     amount = 0.0
                                 else:
-                                    # 移除amount的上限限制，只确保非负
+                                    # 只确保非负
                                     amount = max(0.0, amount)
                                 
                                 # 预留字段
                                 reserve = 0
                                 
-                                # 打包为二进制数据，格式：<IIIIIfQQ
-                                record = pack('<IIIIIfQQ', 
+                                # 固定使用32字节格式，格式：<IIIIIfII
+                                record = pack('<IIIIIfII', 
                                             date_int, open_price, high_price, low_price, 
                                             close_price, amount, volume, reserve)
                                 all_records.append(record)
                             
-                            # 添加转换后的现有数据
+                            # 添加现有数据
                             all_records.extend(existing_data)
                             
                             # 重新写入整个文件
@@ -701,7 +685,7 @@ def download_stock_data(api, stock_list, target_date_int):
                                         low_price = max(0, min(low_price, 4294967295))
                                         close_price = max(0, min(close_price, 4294967295))
                                         
-                                        # 保持成交量原始值，不设置上限
+                                        # 保持成交量原始值，只确保非负
                                         volume = max(0, volume)
                                         
                                         # 获取amount值
@@ -711,14 +695,14 @@ def download_stock_data(api, stock_list, target_date_int):
                                         if math.isnan(amount) or math.isinf(amount):
                                             amount = 0.0
                                         else:
-                                            # 移除amount的上限限制，只确保非负
+                                            # 只确保非负
                                             amount = max(0.0, amount)
                                         
                                         # 预留字段
                                         reserve = 0
                                         
-                                        # 打包为二进制数据，格式：<IIIIIfQQ
-                                        record = pack('<IIIIIfQQ', 
+                                        # 固定使用32字节格式，格式：<IIIIIfII
+                                        record = pack('<IIIIIfII', 
                                                     date_int, open_price, high_price, low_price, 
                                                     close_price, amount, volume, reserve)
                                         f.write(record)
@@ -759,7 +743,7 @@ def download_stock_data(api, stock_list, target_date_int):
                                             low_price = max(0, min(low_price, 4294967295))
                                             close_price = max(0, min(close_price, 4294967295))
                                             
-                                            # 保持成交量原始值，不设置上限
+                                            # 保持成交量原始值，只确保非负
                                             volume = max(0, volume)
                                             
                                             # 获取amount值
@@ -769,14 +753,14 @@ def download_stock_data(api, stock_list, target_date_int):
                                             if math.isnan(amount) or math.isinf(amount):
                                                 amount = 0.0
                                             else:
-                                                # 移除amount的上限限制，只确保非负
+                                                # 只确保非负
                                                 amount = max(0.0, amount)
                                             
                                             # 预留字段
                                             reserve = 0
                                             
-                                            # 打包为二进制数据，格式：<IIIIIfQQ
-                                            record = pack('<IIIIIfQQ', 
+                                            # 固定使用32字节格式，格式：<IIIIIfII
+                                            record = pack('<IIIIIfII', 
                                                         date_int, open_price, high_price, low_price, 
                                                         close_price, amount, volume, reserve)
                                             f.write(record)
@@ -820,7 +804,7 @@ def download_stock_data(api, stock_list, target_date_int):
                                 low_price = max(0, min(low_price, 4294967295))
                                 close_price = max(0, min(close_price, 4294967295))
                                 
-                                # 保持成交量原始值，不设置上限
+                                # 保持成交量原始值，只确保非负
                                 volume = max(0, volume)
                                 
                                 # 获取amount值
@@ -830,21 +814,21 @@ def download_stock_data(api, stock_list, target_date_int):
                                 if math.isnan(amount) or math.isinf(amount):
                                     amount = 0.0
                                 else:
-                                    # 移除amount的上限限制，只确保非负
+                                    # 只确保非负
                                     amount = max(0.0, amount)
                                 
                                 # 预留字段
                                 reserve = 0
                                 
-                                # 打包为二进制数据，格式：<IIIIIfQQ
-                                record = pack('<IIIIIfQQ', 
+                                # 固定使用32字节格式，格式：<IIIIIfII
+                                record = pack('<IIIIIfII', 
                                             date_int, open_price, high_price, low_price, 
                                             close_price, amount, volume, reserve)
                                 f.write(record)
                         
                         # 输出下载信息
-                    operation = '下载' if mode == 'wb' else '追加'
-                    print(f"  成功{operation} {market_prefix}{code} 的日线数据，共 {len(all_data)} 条")
+                        operation = '下载' if mode == 'wb' else '追加'
+                        print(f"  成功{operation} {market_prefix}{code} 的日线数据，共 {len(all_data)} 条")
                     
                     updated_count += 1
                     success_count += 1

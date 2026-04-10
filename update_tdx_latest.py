@@ -326,12 +326,20 @@ def download_latest_data():
         batch_size = 100
         total_batches = (len(stock_list) + batch_size - 1) // batch_size
         
+        # 快速检测参数：只检测前N个批次，如果都没有更新则提前退出
+        quick_check_batches = 2
+        quick_check_done = False
+        
         for batch_idx in range(total_batches):
             start_idx = batch_idx * batch_size
             end_idx = min((batch_idx + 1) * batch_size, len(stock_list))
             batch = stock_list[start_idx:end_idx]
             
             print(f"处理批次 {batch_idx + 1}/{total_batches} ({start_idx + 1}-{end_idx}/{len(stock_list)})")
+            
+            # 如果是快速检测阶段且已有更新，说明数据可能需要全面检查
+            if quick_check_done and updated_count > 0:
+                quick_check_done = False
             
             for market_prefix, code in batch:
                 # 只处理主板和中小板股票，跳过科创板股票（688开头）
@@ -347,7 +355,7 @@ def download_latest_data():
                     ensure_dir(data_path)
                     target_file = os.path.join(data_path, f"{market_prefix}{code}.day")
                     
-                    # 检查现有文件，获取最后一条记录的日期
+                    # 检查现有文件，获取最后一条记录的日期（最新日期在文件末尾）
                     last_date = None
                     file_exists = os.path.exists(target_file)
                     
@@ -357,11 +365,11 @@ def download_latest_data():
                                 f.seek(0, 2)  # 定位到文件末尾
                                 file_size = f.tell()
                                 if file_size >= 32:
-                                    # 读取文件开头的第一条记录（最新数据）
-                                    f.seek(0, 0)  # 定位到文件开头
-                                    first_record = f.read(32)
+                                    # 读取文件末尾的最后一条记录（最新数据）
+                                    f.seek(-32, 2)  # 定位到倒数第一条记录
+                                    last_record = f.read(32)
                                     from struct import unpack
-                                    date = unpack('<IIIIIfII', first_record)[0]  # 读取日期字段
+                                    date = unpack('<IIIIIfII', last_record)[0]  # 读取日期字段
                                     
                                     # 验证日期有效性（19900101-20301231）
                                     if 19900101 <= date <= 20301231:
@@ -473,7 +481,6 @@ def download_latest_data():
                         current_offset += max_bars_per_request
                     
                     if has_new_data and all_data:
-                        # 对所有数据按照日期从新到旧进行排序，确保顺序正确
                         # 为每条数据添加日期字段，用于排序
                         for k_line in all_data:
                             if 'datetime' in k_line:
@@ -484,9 +491,6 @@ def download_latest_data():
                                 month = k_line.get('month', 0)
                                 day = k_line.get('day', 0)
                                 k_line['sort_date'] = year * 10000 + month * 100 + day
-                        
-                        # 按照日期从新到旧排序
-                        all_data.sort(key=lambda x: x['sort_date'], reverse=True)
                         
                         # 过滤掉无效日期记录
                         valid_data = []
@@ -501,145 +505,73 @@ def download_latest_data():
                             print(f"  没有有效数据，跳过")
                             continue
                         
+                        # 按日期从旧到新排序（追加模式需要旧数据在前）
+                        all_data.sort(key=lambda x: x['sort_date'])
+                        
                         if file_exists:
-                            # 追加模式：需要先读取现有文件，将现有数据与新数据合并，然后重新写入
+                            # 追加模式：新数据追加到文件末尾（最新日期在后面）
+                            # all_data 已经按从旧到新排序，直接追加即可
                             try:
-                                existing_data = []
-                                with open(target_file, 'rb') as f:
-                                    while True:
-                                        record = f.read(32)
-                                        if not record or len(record) != 32:
-                                            break
-                                        # 验证现有记录的日期有效性
-                                        from struct import unpack
-                                        try:
-                                            date = unpack('<I', record[0:4])[0]
-                                            # 只保留有效的日期范围（19900101-20301231）
-                                            if 19900101 <= date <= 20301231:
-                                                existing_data.append(record)
-                                        except Exception:
-                                            # 跳过无效记录
-                                            continue
-                                
-                                # 新数据在前，现有数据在后，保持最新数据在开头
-                                all_records = []
-                                
-                                # 打包新数据
-                                from struct import pack
-                                for k_line in all_data:
-                                    # 解析日期
-                                    date_int = k_line['sort_date']
-                                    
-                                    # 价格转换（实际价格×100）
-                                    open_price = int(k_line.get('open', 0) * 100)
-                                    high_price = int(k_line.get('high', 0) * 100)
-                                    low_price = int(k_line.get('low', 0) * 100)
-                                    close_price = int(k_line.get('close', 0) * 100)
-                                    
-                                    # 成交量和成交额
-                                    volume = int(k_line.get('vol', 0))
-                                    amount = k_line.get('amount', 0)
-                                    
-                                    # 预留字段
-                                    reserve = 0
-                                    
-                                    # 打包为二进制数据，格式：<IIIIIfII
-                                    record = pack('<IIIIIfII', 
-                                                date_int, open_price, high_price, low_price, 
-                                                close_price, amount, volume, reserve)
-                                    all_records.append(record)
-                                
-                                # 添加现有数据
-                                all_records.extend(existing_data)
-                                
-                                # 重新写入整个文件
+                                with open(target_file, 'ab') as f:
+                                    for k_line in all_data:
+                                        # 解析日期
+                                        date_int = k_line['sort_date']
+                                        
+                                        # 价格转换（实际价格×100）
+                                        open_price = int(k_line.get('open', 0) * 100)
+                                        high_price = int(k_line.get('high', 0) * 100)
+                                        low_price = int(k_line.get('low', 0) * 100)
+                                        close_price = int(k_line.get('close', 0) * 100)
+                                        
+                                        # 成交量和成交额
+                                        volume = int(k_line.get('vol', 0))
+                                        amount = k_line.get('amount', 0)
+                                        
+                                        # 预留字段
+                                        reserve = 0
+                                        
+                                        # 打包为二进制数据，格式：<IIIIIfII
+                                        from struct import pack
+                                        record = pack('<IIIIIfII', 
+                                                    date_int, open_price, high_price, low_price, 
+                                                    close_price, amount, volume, reserve)
+                                        f.write(record)
+                                mode = 'ab'
+                            except PermissionError as e:
+                                print(f"  写入文件失败: {e}，尝试删除后重新创建")
                                 try:
-                                    with open(target_file, 'wb') as f:
-                                        for record in all_records:
-                                            f.write(record)
-                                    
-                                    mode = 'ab'  # 实际是重写，但保持operation显示为追加
-                                except PermissionError as e:
-                                    print(f"  写入文件失败: {e}，尝试以只读方式打开失败，将尝试其他方法")
-                                    # 尝试先删除文件，然后重新创建
-                                    try:
-                                        os.remove(target_file)
-                                        with open(target_file, 'wb') as f:
-                                            for record in all_records:
-                                                f.write(record)
-                                        mode = 'ab'
-                                        print(f"  成功删除并重新创建文件")
-                                    except Exception as e2:
-                                        print(f"  删除并重新创建文件失败: {e2}，将跳过该文件")
-                                        continue
-                            except Exception as e:
-                                print(f"  合并数据失败: {e}，将重新下载所有数据")
-                                # 重新下载所有数据
-                                from struct import pack
-                                try:
+                                    os.remove(target_file)
                                     with open(target_file, 'wb') as f:
                                         for k_line in all_data:
-                                            # 解析日期
                                             date_int = k_line['sort_date']
-                                            
-                                            # 价格转换（实际价格×100）
                                             open_price = int(k_line.get('open', 0) * 100)
                                             high_price = int(k_line.get('high', 0) * 100)
                                             low_price = int(k_line.get('low', 0) * 100)
                                             close_price = int(k_line.get('close', 0) * 100)
-                                            
-                                            # 成交量和成交额
                                             volume = int(k_line.get('vol', 0))
                                             amount = k_line.get('amount', 0)
-                                            
-                                            # 预留字段
                                             reserve = 0
-                                            
-                                            # 打包为二进制数据，格式：<IIIIIfII
+                                            from struct import pack
                                             record = pack('<IIIIIfII', 
                                                         date_int, open_price, high_price, low_price, 
                                                         close_price, amount, volume, reserve)
                                             f.write(record)
                                     mode = 'wb'
-                                except PermissionError as e:
-                                    print(f"  写入文件失败: {e}，尝试以只读方式打开失败，将尝试其他方法")
-                                    # 尝试先删除文件，然后重新创建
-                                    try:
-                                        os.remove(target_file)
-                                        with open(target_file, 'wb') as f:
-                                            for k_line in all_data:
-                                                # 解析日期
-                                                date_int = k_line['sort_date']
-                                                
-                                                # 价格转换（实际价格×100）
-                                                open_price = int(k_line.get('open', 0) * 100)
-                                                high_price = int(k_line.get('high', 0) * 100)
-                                                low_price = int(k_line.get('low', 0) * 100)
-                                                close_price = int(k_line.get('close', 0) * 100)
-                                                
-                                                # 成交量和成交额
-                                                volume = int(k_line.get('vol', 0))
-                                                amount = k_line.get('amount', 0)
-                                                
-                                                # 预留字段
-                                                reserve = 0
-                                                
-                                                # 打包为二进制数据，格式：<IIIIIfII
-                                                record = pack('<IIIIIfII', 
-                                                            date_int, open_price, high_price, low_price, 
-                                                            close_price, amount, volume, reserve)
-                                                f.write(record)
-                                        mode = 'wb'
-                                        print(f"  成功删除并重新创建文件")
-                                    except Exception as e2:
-                                        print(f"  删除并重新创建文件失败: {e2}，将跳过该文件")
-                                        continue
+                                    print(f"  成功删除并重新创建文件")
+                                except Exception as e2:
+                                    print(f"  追加数据失败: {e2}，将跳过该文件")
+                                    continue
+                            except Exception as e:
+                                print(f"  追加数据失败: {e}，将跳过该文件")
+                                continue
                         else:
-                            # 新文件：直接写入，保持API返回的从新到旧顺序
+                            # 新文件：直接写入，按日期从旧到新排序（方便追加）
                             mode = 'wb'
                             from struct import pack
+                            # 先按日期从旧到新排序（追加模式需要旧数据在前）
+                            all_data_sorted = sorted(all_data, key=lambda x: x['sort_date'])
                             with open(target_file, mode) as f:
-                                for k_line in all_data:
+                                for k_line in all_data_sorted:
                                     # 解析日期
                                     date_int = k_line['sort_date']
                                     
@@ -677,6 +609,21 @@ def download_latest_data():
                     fail_count += 1
                     # 跳过失败的股票，继续处理下一个
                     continue
+            
+            # 批次处理完成，检查是否需要提前退出
+            if not quick_check_done and batch_idx + 1 >= quick_check_batches:
+                # 快速检测完成（已处理完前N个批次）
+                if updated_count == 0:
+                    # 前N个批次都没有更新，提前退出
+                    remaining_batches = total_batches - (batch_idx + 1)
+                    print(f"\n=== 快速检测完成：前{quick_check_batches}个批次共{end_idx}只股票均无更新 ===")
+                    print(f"=== 判定所有{len(stock_list)}只股票日线数据已是最新，跳过剩余{remaining_batches}个批次 ===\n")
+                    quick_check_done = True
+                    break
+                else:
+                    # 发现有更新，继续处理所有批次
+                    quick_check_done = True
+                    print(f"\n=== 发现{updated_count}只股票有更新，继续处理所有批次 ===\n")
         
         print(f"数据下载完成，成功: {success_count} 只，更新: {updated_count} 只，失败: {fail_count} 只")
         
@@ -706,7 +653,7 @@ def download_latest_data():
                 ensure_dir(data_path)
                 target_file = os.path.join(data_path, f"{market_prefix}{code}.day")
                 
-                # 检查现有文件，获取最后一条记录的日期
+                # 检查现有文件，获取最后一条记录的日期（最新日期在文件末尾）
                 last_date = None
                 file_exists = os.path.exists(target_file)
                 
@@ -716,11 +663,11 @@ def download_latest_data():
                             f.seek(0, 2)  # 定位到文件末尾
                             file_size = f.tell()
                             if file_size >= 32:
-                                # 读取文件开头的第一条记录（最新数据）
-                                f.seek(0, 0)  # 定位到文件开头
-                                first_record = f.read(32)
+                                # 读取文件末尾的最后一条记录（最新数据）
+                                f.seek(-32, 2)  # 定位到倒数第一条记录
+                                last_record = f.read(32)
                                 from struct import unpack
-                                date = unpack('<IIIIIfII', first_record)[0]  # 读取日期字段
+                                date = unpack('<IIIIIfII', last_record)[0]  # 读取日期字段
                                 
                                 # 验证日期有效性（19900101-20301231）
                                 if 19900101 <= date <= 20301231:
@@ -807,10 +754,8 @@ def download_latest_data():
                 
                 print(f"  Baostock返回总行数: {total_rows}, 处理后行数: {processed_rows}, 最大日期: {max_date}, 目标日期: {target_date_int}")
                 
-                # 如果有数据，按照日期从新到旧排序
+                # 如果有数据，标记有新数据
                 if all_data:
-                    all_data.sort(key=lambda x: x['sort_date'], reverse=True)
-                    print(f"  排序后数据范围: {all_data[-1]['sort_date']} 到 {all_data[0]['sort_date']}")
                     has_new_data = True
                 else:
                     print(f"  没有新数据需要更新")
@@ -822,104 +767,18 @@ def download_latest_data():
                     print(f"  这可能是因为 {target_date_int} 是非交易日或数据尚未更新")
                 
                 if has_new_data and all_data:
+                    # 按日期从旧到新排序（追加模式需要旧数据在前）
+                    all_data.sort(key=lambda x: x['sort_date'])
+                    print(f"  排序后数据范围: {all_data[0]['sort_date']} 到 {all_data[-1]['sort_date']}")
+                    
                     if file_exists:
-                        # 追加模式：需要先读取现有文件，将现有数据与新数据合并，然后重新写入
+                        # 追加模式：新数据追加到文件末尾（最新日期在后面）
+                        # all_data 已经按从旧到新排序，直接追加即可
                         try:
-                            existing_data = []
-                            with open(target_file, 'rb') as f:
-                                while True:
-                                    record = f.read(32)
-                                    if not record or len(record) != 32:
-                                        break
-                                    # 验证现有记录的日期有效性
-                                    from struct import unpack
-                                    try:
-                                        date = unpack('<I', record[0:4])[0]
-                                        # 只保留有效的日期范围（19900101-20301231）
-                                        if 19900101 <= date <= 20301231:
-                                            existing_data.append(record)
-                                    except Exception:
-                                        # 跳过无效记录
-                                        continue
-                            
-                            # 新数据在前，现有数据在后，保持最新数据在开头
-                            all_records = []
                             new_records_count = 0
-                            
-                            # 打包新数据
-                            from struct import pack
-                            for k_line in all_data:
-                                try:
-                                    # 解析日期
-                                    date_int = k_line['sort_date']
-                                    
-                                    # 检查价格有效性（确保价格为正数且合理）
-                                    open_p = k_line.get('open', 0)
-                                    high_p = k_line.get('high', 0)
-                                    low_p = k_line.get('low', 0)
-                                    close_p = k_line.get('close', 0)
-                                    
-                                    if open_p <= 0 or high_p <= 0 or low_p <= 0 or close_p <= 0:
-                                        continue  # 跳过无效数据
-                                    
-                                    # 价格转换（实际价格×100）
-                                    open_price = int(round(open_p * 100))
-                                    high_price = int(round(high_p * 100))
-                                    low_price = int(round(low_p * 100))
-                                    close_price = int(round(close_p * 100))
-                                    
-                                    # 成交量和成交额处理
-                                    import math
-                                    volume = int(k_line.get('vol', 0))
-                                    
-                                    # 检查所有整数字段是否在范围内
-                                    date_int = max(0, min(date_int, 4294967295))
-                                    open_price = max(0, min(open_price, 4294967295))
-                                    high_price = max(0, min(high_price, 4294967295))
-                                    low_price = max(0, min(low_price, 4294967295))
-                                    close_price = max(0, min(close_price, 4294967295))
-                                    volume = max(0, min(volume, 4294967295))
-                                    
-                                    # 获取amount值
-                                    amount = k_line.get('amount', 0)
-                                    
-                                    # 检查amount是否为有效浮点数
-                                    if math.isnan(amount) or math.isinf(amount):
-                                        amount = 0.0
-                                    else:
-                                        # 限制amount在float可表示的合理范围内
-                                        amount = max(-1e38, min(amount, 1e38))
-                                    
-                                    # 预留字段
-                                    reserve = 0
-                                    
-                                    # 打包为二进制数据，格式：<IIIIIfII
-                                    record = pack('<IIIIIfII', 
-                                                date_int, open_price, high_price, low_price, 
-                                                close_price, amount, volume, reserve)
-                                    
-                                    # 添加到记录列表
-                                    all_records.append(record)
-                                    new_records_count += 1
-                                except Exception as e:
-                                    print(f"  处理数据失败: {e}")
-                                    continue
-                            
-                            # 添加现有数据
-                            all_records.extend(existing_data)
-                            
-                            # 重新写入整个文件
-                            with open(target_file, 'wb') as f:
-                                for record in all_records:
-                                    f.write(record)
-                            
-                            mode = 'ab'  # 实际是重写，但保持operation显示为追加
-                        except Exception as e:
-                            print(f"  合并数据失败: {e}，将重新下载所有数据")
-                            # 重新下载所有数据
-                            new_records_count = 0
-                            from struct import pack
-                            with open(target_file, 'wb') as f:
+                            with open(target_file, 'ab') as f:
+                                from struct import pack
+                                import math
                                 for k_line in all_data:
                                     try:
                                         # 解析日期
@@ -941,7 +800,6 @@ def download_latest_data():
                                         close_price = int(round(close_p * 100))
                                         
                                         # 成交量和成交额处理
-                                        import math
                                         volume = int(k_line.get('vol', 0))
                                         
                                         # 检查所有整数字段是否在范围内
@@ -970,20 +828,76 @@ def download_latest_data():
                                                     date_int, open_price, high_price, low_price, 
                                                     close_price, amount, volume, reserve)
                                         
-                                        # 写入文件
+                                        # 追加写入文件
                                         f.write(record)
                                         new_records_count += 1
                                     except Exception as e:
                                         print(f"  处理数据失败: {e}")
                                         continue
-                            mode = 'wb'
+                            mode = 'ab'
+                        except PermissionError as e:
+                            print(f"  追加文件失败: {e}，尝试删除后重新创建")
+                            try:
+                                os.remove(target_file)
+                                new_records_count = 0
+                                from struct import pack
+                                import math
+                                with open(target_file, 'wb') as f:
+                                    for k_line in all_data:
+                                        try:
+                                            date_int = k_line['sort_date']
+                                            open_p = k_line.get('open', 0)
+                                            high_p = k_line.get('high', 0)
+                                            low_p = k_line.get('low', 0)
+                                            close_p = k_line.get('close', 0)
+                                            
+                                            if open_p <= 0 or high_p <= 0 or low_p <= 0 or close_p <= 0:
+                                                continue
+                                            
+                                            open_price = int(round(open_p * 100))
+                                            high_price = int(round(high_p * 100))
+                                            low_price = int(round(low_p * 100))
+                                            close_price = int(round(close_p * 100))
+                                            volume = int(k_line.get('vol', 0))
+                                            
+                                            date_int = max(0, min(date_int, 4294967295))
+                                            open_price = max(0, min(open_price, 4294967295))
+                                            high_price = max(0, min(high_price, 4294967295))
+                                            low_price = max(0, min(low_price, 4294967295))
+                                            close_price = max(0, min(close_price, 4294967295))
+                                            volume = max(0, min(volume, 4294967295))
+                                            
+                                            amount = k_line.get('amount', 0)
+                                            if math.isnan(amount) or math.isinf(amount):
+                                                amount = 0.0
+                                            else:
+                                                amount = max(-1e38, min(amount, 1e38))
+                                            
+                                            record = pack('<IIIIIfII', 
+                                                        date_int, open_price, high_price, low_price, 
+                                                        close_price, amount, volume, 0)
+                                            f.write(record)
+                                            new_records_count += 1
+                                        except Exception as e:
+                                            continue
+                                mode = 'wb'
+                                print(f"  成功删除并重新创建文件")
+                            except Exception as e2:
+                                print(f"  创建文件失败: {e2}，将跳过该文件")
+                                continue
+                        except Exception as e:
+                            print(f"  追加数据失败: {e}，将跳过该文件")
+                            continue
                     else:
-                        # 新文件：直接写入，保持API返回的从新到旧顺序
+                        # 新文件：按日期从旧到新排序写入（方便后续追加）
                         mode = 'wb'
                         new_records_count = 0
                         from struct import pack
+                        import math
+                        # 按日期从旧到新排序
+                        all_data_sorted = sorted(all_data, key=lambda x: x['sort_date'])
                         with open(target_file, mode) as f:
-                            for k_line in all_data:
+                            for k_line in all_data_sorted:
                                 try:
                                     # 解析日期
                                     date_int = k_line['sort_date']
@@ -1004,7 +918,6 @@ def download_latest_data():
                                     close_price = int(round(close_p * 100))
                                     
                                     # 成交量和成交额处理
-                                    import math
                                     volume = int(k_line.get('vol', 0))
                                     
                                     # 检查所有整数字段是否在范围内

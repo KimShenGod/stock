@@ -101,8 +101,12 @@ def stockSelectionStrategy(df, start_date='', end_date='', mode=None):
                 limit_up_rate = 1.2  # 科创板和创业板涨停幅度20%
             else:
                 limit_up_rate = 1.1  # 普通股票涨停幅度10%
-            # 检查是否涨停
-            is_limit_up = ~((close_price + 0.01) >= np.ceil((np.floor(REF(close_price, 1) * 1000 * limit_up_rate) - 4) / 10) / 100)
+            # 检查是否涨停（使用更精确的涨停价计算）
+            # 涨停价 = floor(昨收价 * 涨停幅度 * 100 + 0.5) / 100
+            prev_close = REF(close_price, 1)
+            limit_up_price = np.floor(prev_close * limit_up_rate * 100 + 0.5) / 100
+            # 涨停条件：收盘价 >= 涨停价（考虑浮点数精度误差0.01）
+            is_limit_up = close_price >= (limit_up_price - 0.01)
             is_limit_up_today = is_limit_up.iat[-1]
 
             result = is_limit_up_today
@@ -119,8 +123,10 @@ def stockSelectionStrategy(df, start_date='', end_date='', mode=None):
                 limit_up_rate = 1.2  # 科创板和创业板涨停幅度20%
             else:
                 limit_up_rate = 1.1  # 普通股票涨停幅度10%
-            # 检查是否涨停
-            is_limit_up = ~((close_price + 0.01) >= np.ceil((np.floor(REF(close_price, 1) * 1000 * limit_up_rate) - 4) / 10) / 100)
+            # 检查是否涨停（使用更精确的涨停价计算）
+            prev_close = REF(close_price, 1)
+            limit_up_price = np.floor(prev_close * limit_up_rate * 100 + 0.5) / 100
+            is_limit_up = close_price >= (limit_up_price - 0.01)
 
             result = condition1 & is_limit_up
         return result
@@ -283,9 +289,9 @@ def sellSignalStrategy(df, buy_signal, start_date='', end_date=''):
     # 卖出条件2：最高点小于前低点，表示有向下跳空缺口
     sell_condition2 = (buy_pct < 0.1) & (high_price < REF(low_price, 1))
 
-    # 卖出条件3：持有N天后涨幅小
+    # 卖出条件3：持有N天后涨幅小（收益率在1%-3%之间）
     hold_days = circulation_mv_billion.apply(lambda x: 7 if x < 100 else 14)  # 根据市值确定持有天数
-    sell_condition3 = (days_since_buy > hold_days) & (0.01 < close_price / buy_pct) & (close_price / buy_pct < 0.03)
+    sell_condition3 = (days_since_buy > hold_days) & (buy_pct > 0.01) & (buy_pct < 0.03)
 
     # 最终卖出信号
     sell_signal = sell_condition1 | sell_condition2 | sell_condition3
@@ -954,111 +960,6 @@ def macdDailyGoldenCrossStrategy(df, start_date='', end_date='', mode=None):
         return pd.Series([False] * len(df), index=df.index)
 
 
-def macdWeeklyGoldenCrossStrategy(df, start_date='', end_date='', mode=None):
-    """
-    MACD周线金叉策略：筛选出周线MACD指标出现金叉且在零轴上方的股票
-    MACD金叉是指DIF线（快线）从下向上穿过DEA线（慢线）
-    零轴上方意味着DIF线和DEA线都在零轴以上，代表股票处于多头市场
-    :param df: DataFrame格式，具体一个股票的数据表
-    :param start_date: 可选，开始日期，格式"2020-10-10"
-    :param end_date: 可选，结束日期，格式"2020-10-10"
-    :param mode: str类型，'fast'为快速模式，用于盘中选股，获取实时行情数据
-    :return: 布尔序列，每个元素对应一个交易日的选股结果
-    """
-    try:
-        # 处理date既是索引又是列的情况
-        # 创建一个副本，避免修改原数据
-        df_copy = df.copy()
-        
-        # 确保数据按日期排序
-        if isinstance(df_copy.index, pd.DatetimeIndex):
-            # 如果索引是日期类型，直接排序
-            df_copy = df_copy.sort_index()
-        else:
-            # 否则，使用date列排序
-            df_copy = df_copy.sort_values('date')
-            # 设置日期为索引
-            df_copy.set_index('date', drop=False, inplace=True)
-        
-        # 处理日期筛选
-        if start_date:
-            start_dt = pd.to_datetime(start_date)
-            df_copy = df_copy[df_copy.index >= start_dt]
-        if end_date:
-            end_dt = pd.to_datetime(end_date)
-            df_copy = df_copy[df_copy.index <= end_dt]
-
-        # 确保数据量足够（至少需要20周数据，约100个交易日）
-        if len(df_copy) < 100:
-            return pd.Series([False] * len(df), index=df.index)
-        
-        # 将日线数据转换为周线数据
-        # 周线数据的计算方式：
-        # - 开盘价：每周第一个交易日的开盘价
-        # - 最高价：每周所有交易日的最高价
-        # - 最低价：每周所有交易日的最低价
-        # - 收盘价：每周最后一个交易日的收盘价
-        weekly_data = df_copy.resample('W').agg({
-            'open': 'first',
-            'high': 'max',
-            'low': 'min',
-            'close': 'last'
-        })
-        
-        # 确保周线数据量足够（至少需要26周数据，MACD计算需要）
-        if len(weekly_data) < 26:
-            return pd.Series([False] * len(df), index=df.index)
-        
-        # 计算周线MACD指标
-        # 默认参数：fastperiod=12, slowperiod=26, signalperiod=9
-        weekly_close = weekly_data['close']
-        macd, macdsignal, macdhist = talib.MACD(weekly_close, fastperiod=12, slowperiod=26, signalperiod=9)
-        
-        # 检查MACD数据是否有效
-        if macd.isnull().all() or macdsignal.isnull().all():
-            return pd.Series([False] * len(df), index=df.index)
-        
-        # MACD金叉是指DIF线（macd）从下向上穿过DEA线（macdsignal）
-        # 计算前一天的DIF和DEA值
-        prev_macd = macd.shift(1)
-        prev_macdsignal = macdsignal.shift(1)
-        
-        # 生成金叉信号：当前DIF > 当前DEA 且 前一天DIF <= 前一天DEA，同时DIF和DEA都在零轴上方
-        # 零轴上方条件：DIF > 0 且 DEA > 0
-        golden_cross = (macd > macdsignal) & (prev_macd <= prev_macdsignal) & (macd > 0) & (macdsignal > 0)
-        
-        # 获取股票代码，用于调试
-        stock_code = df_copy['code'].iloc[0] if 'code' in df_copy.columns else 'unknown'
-        
-        # 检查最近5周内是否出现过金叉
-        recent_golden_cross = golden_cross.tail(5).any()
-        
-        # 调试信息
-        # print(f"股票代码: {stock_code}，最近5周金叉情况: {recent_golden_cross}, 总金叉数: {golden_cross.sum()}")
-        
-        # 简化逻辑：如果最近5周内出现过金叉，就认为符合条件
-        if recent_golden_cross:
-            # 对于快速模式，直接返回True
-            if mode == 'fast':
-                return True
-            else:
-                # 对于普通模式，返回完整序列，最后一天设为True
-                final_result = pd.Series([False] * len(df), index=df.index)
-                if len(final_result) > 0:
-                    final_result.iloc[-1] = True
-                return final_result
-        else:
-            # 没有金叉，返回False
-            if mode == 'fast':
-                return False
-            else:
-                return pd.Series([False] * len(df), index=df.index)
-    except Exception as e:
-        print(f"MACD周线金叉策略异常：{e}")
-        # 如果发生任何异常，返回一个与df索引相同长度的False序列
-        return pd.Series([False] * len(df), index=df.index)
-
-
 def continuousRiseWithNearHighStrategy(df, start_date='', end_date='', mode=None):
     """
     持续上升且接近最高价策略：
@@ -1133,6 +1034,7 @@ def continuousRiseWithNearHighStrategy(df, start_date='', end_date='', mode=None
         return pd.Series([False] * len(df), index=df.index)
 
 
+@register_strategy("MACD周线区间")
 def macdWeeklyRangeStrategy(df, start_date='', end_date='', mode=None):
     """
     周线MACD区间策略：筛选出最近一周的MACD、DIF、DEA同时在0.05到0.3之间，且最近2周以上MACD值逐步放大的股票

@@ -115,29 +115,38 @@ def day2csv(source_dir, file_name, target_dir):
                 begin = 0
                 last_date = None
             else:
-                # 获取目标文件最后一行的日期
-                last_line = target_file_content[-1].strip()
-                if last_line:
-                    last_date = last_line.split(',')[0]
-                else:
-                    # 如果最后一行是空行，继续往上找
-                    for i in range(row_number-2, 0, -1):
-                        line = target_file_content[i].strip()
-                        if line:
-                            last_date = line.split(',')[0]
-                            break
+                # 由于CSV从新到旧排列，第一行是最新日期
+                # 获取目标文件第一行的日期（最新日期）
+                if len(target_file_content) > 1:
+                    first_line = target_file_content[1].strip()  # 第一行是表头，第二行是最新日期
+                    if first_line:
+                        last_date = first_line.split(',')[0]
                     else:
-                        last_date = None
+                        # 如果第一行是空行，往下找
+                        for i in range(2, row_number):
+                            line = target_file_content[i].strip()
+                            if line:
+                                last_date = line.split(',')[0]
+                                break
+                        else:
+                            last_date = None
+                else:
+                    last_date = None
         
         # 确定在通达信.day文件中的起始位置
+        # 由于CSV从新到旧排列，last_date是CSV第一行（最新日期）
+        # .day文件从旧到新排列，需要从末尾向前查找
         begin = 0
         end = begin + 32
         found = False
         
-        # 如果有最后日期，遍历通达信文件找到对应的位置
-        if last_date:
-            for i in range(source_row_number):
-                # 读取当前32字节的数据
+        # 如果有last_date（CSV第一行，即最新日期），从.day文件末尾向前查找
+        if last_date and source_row_number > 0:
+            # 从.day文件末尾开始向前查找last_date
+            current_pos = source_row_number - 1
+            while current_pos >= 0:
+                begin = current_pos * 32
+                end = begin + 32
                 record = buf[begin:end]
                 if len(record) < 32:
                     break
@@ -152,19 +161,20 @@ def day2csv(source_dir, file_name, target_dir):
                     if 1900 <= year <= 2100 and 1 <= month <= 12 and 1 <= day <= 31:
                         current_date = f"{year}-{month:02d}-{day:02d}"
                         if current_date == last_date:
-                            # 找到最后日期，从下一条记录开始
-                            begin += 32
-                            end += 32
+                            # 找到最新日期，从下一条记录开始（往回找更早的日期）
                             found = True
                             break
                 except (ValueError, IndexError):
                     pass
                 
-                begin += 32
-                end += 32
+                current_pos -= 1
+            
+            if found:
+                # 从last_date的下一条（更早的日期）开始读取
+                begin = (current_pos) * 32
+                end = begin + 32
         
         # 如果没找到最后日期，只处理最新的数据，而不是从开头重新开始
-        # 这样可以避免产生重复数据
         if not found:
             # 如果没找到最后日期，说明可能是文件格式问题或日期不匹配
             # 只处理最新的几条记录，避免重复数据
@@ -246,8 +256,8 @@ def day2csv(source_dir, file_name, target_dir):
         print(f"文件{target_path}没有新数据需要追加")
         return
     
-    # 按日期排序，确保数据顺序正确
-    data_rows.sort(key=lambda x: x['date'])
+    # 按日期从新到旧排序，确保最新数据在CSV第一行
+    data_rows.sort(key=lambda x: x['date'], reverse=True)
     
     # 读取现有的CSV文件内容，以便去重
     if row_number > 0:
@@ -440,6 +450,7 @@ class ManyThreadDownload:
         self.url = ''  # url
         self.name = ''  # 目标地址
         self.total = 0  # 文件大小
+        self._lock = threading.Lock()  # 添加线程锁用于文件写入
 
     # 获取每个线程下载的区间
     def get_range(self):
@@ -454,42 +465,57 @@ class ManyThreadDownload:
 
     # 通过传入开始和结束位置来下载文件
     def download(self, ts_queue):
-        while not ts_queue.empty():
-            start_, end_ = ts_queue.get()
-            headers = {
-                'Range': 'Bytes=%s-%s' % (start_, end_),
-                'Accept-Encoding': '*'
-            }
-            flag = False
-            while not flag:
-                try:
-                    # 设置重连次数
-                    requests.adapters.DEFAULT_RETRIES = 10
-                    # s = requests.session()            # 每次都会发起一次TCP握手,性能降低，还可能因发起多个连接而被拒绝
-                    # # 设置连接活跃状态为False
-                    # s.keep_alive = False
-                    # 默认stream=false,立即下载放到内存,文件过大会内存不足,大文件时用True需改一下码子
-                    res = requests.get(self.url, headers=headers)
-                    res.close()  # 关闭请求  释放内存
-                except Exception as e:
-                    print((start_, end_, "出错了,连接重试:%s", e,))
-                    time.sleep(1)
-                    continue
-                flag = True
-
-            # print("\n", ("%s-%s download success" % (start_, end_)), end="", flush=True)
-            # with lock:
-            with open(self.name, "rb+") as fd:
-                fd.seek(start_)
-                fd.write(res.content)
-            # self.fd.seek(start_)                                        # 指定写文件的位置,下载的内容放到正确的位置处
-            # self.fd.write(res.content)                                  # 将下载文件保存到 fd所打开的文件里
+        # 创建独立的session用于每个线程，避免连接冲突
+        session = requests.Session()
+        try:
+            while not ts_queue.empty():
+                start_, end_ = ts_queue.get()
+                headers = {
+                    'Range': 'Bytes=%s-%s' % (start_, end_),
+                    'Accept-Encoding': '*'
+                }
+                flag = False
+                max_retries = 3
+                retry_count = 0
+                
+                while not flag and retry_count < max_retries:
+                    try:
+                        # 设置超时时间，避免长时间阻塞
+                        res = session.get(self.url, headers=headers, timeout=30)
+                        res.raise_for_status()
+                        flag = True
+                        
+                        # 使用线程锁保护文件写入操作
+                        with self._lock:
+                            with open(self.name, "rb+") as fd:
+                                fd.seek(start_)
+                                fd.write(res.content)
+                    except requests.exceptions.RequestException as e:
+                        retry_count += 1
+                        print(f"下载出错 (重试 {retry_count}/{max_retries}): {start_}-{end_}, 错误: {e}")
+                        time.sleep(1)
+                        continue
+                    except IOError as e:
+                        print(f"文件写入出错: {start_}-{end_}, 错误: {e}")
+                        break
+                    finally:
+                        if 'res' in locals():
+                            res.close()  # 确保关闭响应对象
+        finally:
+            session.close()  # 确保关闭会话
 
     def run(self, url, name):
         self.url = url
         self.name = name
-        self.total = int(requests.head(url).headers['Content-Length'])
-        # file_size = int(urlopen(self.url).info().get('Content-Length', -1))
+        try:
+            # 设置超时时间
+            head_response = requests.head(url, timeout=10)
+            self.total = int(head_response.headers['Content-Length'])
+            head_response.close()
+        except requests.exceptions.RequestException as e:
+            print(f"获取文件大小失败: {e}")
+            return None
+        
         file_size = self.total
         if os.path.exists(name):
             first_byte = os.path.getsize(name)
@@ -498,32 +524,39 @@ class ManyThreadDownload:
         if first_byte >= file_size:
             return file_size
 
-        self.fd = open(name, "wb")  # 续传时直接rb+ 文件不存在时会报错,先wb再rb+
-        self.fd.truncate(self.total)  # 建一个和下载文件一样大的文件,不是必须的,stream=True时会用到
-        self.fd.close()
-        # self.fd = open(self.name, "rb+")           # 续传时ab方式打开时会强制指针指向文件末尾,seek并不管用,应用rb+模式
-        thread_list = []
-        ts_queue = Queue()  # 用队列的线程安全特性，以列表的形式把开始和结束加到队列
-        for ran in self.get_range():
-            start_, end_ = ran
-            ts_queue.put((start_, end_))
+        try:
+            # 创建文件并预分配空间
+            self.fd = open(name, "wb")
+            self.fd.truncate(self.total)
+            self.fd.close()
+            
+            thread_list = []
+            ts_queue = Queue()  # 用队列的线程安全特性，以列表的形式把开始和结束加到队列
+            for ran in self.get_range():
+                start_, end_ = ran
+                ts_queue.put((start_, end_))
 
-        for i in range(self.num):
-            t = threading.Thread(target=self.download, name='th-' + str(i), kwargs={'ts_queue': ts_queue})
-            t.setDaemon(True)
-            thread_list.append(t)
-        for t in thread_list:
-            t.start()
-        for t in thread_list:
-            t.join()  # 设置等待，全部线程完事后再继续
+            for i in range(self.num):
+                t = threading.Thread(target=self.download, name='th-' + str(i), kwargs={'ts_queue': ts_queue})
+                t.setDaemon(True)
+                thread_list.append(t)
+            for t in thread_list:
+                t.start()
+            for t in thread_list:
+                t.join()  # 设置等待，全部线程完事后再继续
 
-        self.fd.close()
+            return file_size
+        except IOError as e:
+            print(f"文件操作失败: {e}")
+            return None
 
 
 @retry(tries=3, delay=3)  # 无限重试装饰性函数
-def dowload_url(url):
+def dowload_url(url, timeout=30, max_retries=3):
     """
-    :param url:要下载的url
+    :param url: 要下载的url
+    :param timeout: 请求超时时间（秒），默认30秒
+    :param max_retries: 最大重试次数，默认3次
     :return: request.get实例化对象
     """
     import requests
@@ -531,10 +564,23 @@ def dowload_url(url):
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) '
                       'Chrome/87.0.4280.141',
     }
-    response_obj = requests.get(url, headers=header, timeout=5)  # get方式请求
-    response_obj.raise_for_status()  # 检测异常方法。如有异常则抛出，触发retry
-    # print(f'{url} 下载完成')
-    return response_obj
+    
+    # 设置更长的超时时间和重试机制
+    session = requests.Session()
+    adapter = requests.adapters.HTTPAdapter(
+        max_retries=max_retries,
+        pool_connections=10,
+        pool_maxsize=20
+    )
+    session.mount('http://', adapter)
+    session.mount('https://', adapter)
+    
+    try:
+        response_obj = session.get(url, headers=header, timeout=timeout)
+        response_obj.raise_for_status()  # 检测异常方法。如有异常则抛出，触发retry
+        return response_obj
+    finally:
+        session.close()  # 确保关闭会话释放资源
 
 
 def list_localTDX_cwfile(ext_name):
@@ -844,8 +890,26 @@ def make_fq(code, df_code, df_gbbq, df_cw='', start_date='', end_date='', fqtype
         data['流通市值'] = data['流通股'] * data['close']
         data['换手率'] = (data['vol'] * 100) / data['流通股'] * 100  # vol单位是手，乘以100转换为股
         data = data.round({'流通市值': 2, '换手率': 2, })  # 指定列四舍五入
+
+    # 计算量比：当日成交量 / 过去5日平均成交量
+    # 数据从新到旧排列，第一行是最新日期，第2-6行是过去5日
+    # 注意：vol列是复权后的成交量（单位：股）
+    if 'vol' in data.columns.to_list() and len(data) >= 6:
+        # 计算过去5日平均成交量（排除最新日期，即从第6行开始取5行）
+        if len(data) >= 6:
+            # 过去5日平均成交量（行1-5是过去5日，因为行0是今天）
+            past_5_avg_vol = data['vol'].iloc[1:6].mean()
+            if past_5_avg_vol > 0:
+                # 当日量比 = 当日成交量 / 过去5日平均成交量
+                data['量比'] = data['vol'] / past_5_avg_vol
+            else:
+                data['量比'] = 1.0  # 平均值为0时，量比设为1
+        else:
+            data['量比'] = 1.0  # 数据不足5日，量比设为1
+        data = data.round({'量比': 2})  # 量比保留2位小数
+
     if flag_attach:  # 追加模式，则附加最新处理的数据
-        data = df_code_original.append(data)
+        data = pd.concat([df_code_original, data], ignore_index=True)
 
     if len(start_date) == 0 and len(end_date) == 0:
         pass

@@ -47,49 +47,56 @@ def check_files_exist():
 
 def update_lday():
     # 读取通达信正常交易状态的股票列表。infoharbor_spec.cfg退市文件不齐全，放弃使用
-    tdx_stocks = pd.read_csv(ucfg.tdx['tdx_path'] + '/T0002/hq_cache/infoharbor_ex.code',
+    tdx_stocks_path = os.path.join(ucfg.tdx['tdx_path'], 'T0002', 'hq_cache', 'infoharbor_ex.code')
+    tdx_stocks = pd.read_csv(tdx_stocks_path,
                              sep='|', header=None, index_col=None, encoding='gbk', dtype={0: str})
     file_listsh = tdx_stocks[0][tdx_stocks[0].apply(lambda x: x[0:1] == "6")]
     file_listsz = tdx_stocks[0][tdx_stocks[0].apply(lambda x: x[0:1] != "6")]
 
     print("从通达信深市股票导出数据")
-    # file_list = os.listdir(ucfg.tdx['tdx_path'] + '/vipdoc/sz/lday')
+    sz_lday_path = os.path.join(ucfg.tdx['tdx_path'], 'vipdoc', 'sz', 'lday')
     for f in tqdm(file_listsz):
         f = 'sz' + f + '.day'
-        if os.path.exists(ucfg.tdx['tdx_path'] + '/vipdoc/sz/lday/' + f):  # 处理深市sh00开头和创业板sh30文件，否则跳过此次循环
-            # print(time.strftime("[%H:%M:%S] 处理 ", time.localtime()) + f)
-            func.day2csv(ucfg.tdx['tdx_path'] + '/vipdoc/sz/lday', f, ucfg.tdx['csv_lday'])
+        sz_file_path = os.path.join(sz_lday_path, f)
+        if os.path.exists(sz_file_path):  # 处理深市sh00开头和创业板sh30文件，否则跳过此次循环
+            func.day2csv(sz_lday_path, f, ucfg.tdx['csv_lday'])
 
     print("从通达信导出沪市股票数据")
-    # file_list = os.listdir(ucfg.tdx['tdx_path'] + '/vipdoc/sh/lday')
+    sh_lday_path = os.path.join(ucfg.tdx['tdx_path'], 'vipdoc', 'sh', 'lday')
     for f in tqdm(file_listsh):
         # 处理沪市sh6开头文件，否则跳过此次循环
         f = 'sh' + f + '.day'
-        if os.path.exists(ucfg.tdx['tdx_path'] + '/vipdoc/sh/lday/' + f):
-            # print(time.strftime("[%H:%M:%S] 处理 ", time.localtime()) + f)
-            func.day2csv(ucfg.tdx['tdx_path'] + '/vipdoc/sh/lday', f, ucfg.tdx['csv_lday'])
+        sh_file_path = os.path.join(sh_lday_path, f)
+        if os.path.exists(sh_file_path):
+            func.day2csv(sh_lday_path, f, ucfg.tdx['csv_lday'])
 
     print("从通达信导出指数数据")
+    sz_lday_path = os.path.join(ucfg.tdx['tdx_path'], 'vipdoc', 'sz', 'lday')
+    sh_lday_path = os.path.join(ucfg.tdx['tdx_path'], 'vipdoc', 'sh', 'lday')
     for i in tqdm(ucfg.index_list):
-        # print(time.strftime("[%H:%M:%S] 处理 ", time.localtime()) + i)
         if 'sh' in i:
-            func.day2csv(ucfg.tdx['tdx_path'] + '/vipdoc/sh/lday', i, ucfg.tdx['csv_index'])
+            func.day2csv(sh_lday_path, i, ucfg.tdx['csv_index'])
         elif 'sz' in i:
-            func.day2csv(ucfg.tdx['tdx_path'] + '/vipdoc/sz/lday', i, ucfg.tdx['csv_index'])
+            func.day2csv(sz_lday_path, i, ucfg.tdx['csv_index'])
 
 
 def qfq(file_list, df_gbbq, cw_dict, tqdm_position=None):
     tq = tqdm(file_list, leave=False, position=tqdm_position)
+    csv_lday_path = ucfg.tdx['csv_lday']
+    pickle_path = ucfg.tdx['pickle']
+    
     for filename in tq:
         # process_info = f'[{(file_list.index(filename) + 1):>4}/{str(len(file_list))}] {filename}'
-        df_bfq = pd.read_csv(ucfg.tdx['csv_lday'] + os.sep + filename, index_col=None, encoding='gbk',
+        csv_file_path = os.path.join(csv_lday_path, filename)
+        df_bfq = pd.read_csv(csv_file_path, index_col=None, encoding='gbk',
                              dtype={'code': str})
         df_qfq = func.make_fq(filename[:-4], df_bfq, df_gbbq, cw_dict)
         # lefttime_tick = int((time.time() - starttime_tick) / (file_list.index(filename) + 1) * (len(file_list) - (file_list.index(filename) + 1)))
         if isinstance(df_qfq, pd.DataFrame) and len(df_qfq) > 0:  # 返回值是DataFrame且行数大于0
             # 写入csv和pkl文件，无论是否有更新
-            df_qfq.to_csv(ucfg.tdx['csv_lday'] + os.sep + filename, index=False, encoding='gbk')
-            df_qfq.to_pickle(ucfg.tdx['pickle'] + os.sep + filename[:-4] + '.pkl')
+            df_qfq.to_csv(csv_file_path, index=False, encoding='gbk')
+            pkl_file_path = os.path.join(pickle_path, filename[:-4] + '.pkl')
+            df_qfq.to_pickle(pkl_file_path)
             tq.set_description(filename + "复权完成")
         else:
             tq.set_description(filename + "复权失败")
@@ -116,7 +123,8 @@ if __name__ == '__main__':
     # 处理生成的通达信日线数据，复权加工代码
     file_list = os.listdir(ucfg.tdx['csv_lday'])
     starttime_tick = time.time()
-    df_gbbq = pd.read_csv(ucfg.tdx['csv_gbbq'] + '/gbbq.csv', encoding='gbk', dtype={'code': str})
+    gbbq_path = os.path.join(ucfg.tdx['csv_gbbq'], 'gbbq.csv')
+    df_gbbq = pd.read_csv(gbbq_path, encoding='gbk', dtype={'code': str})
     cw_dict = func.readall_local_cwfile()
 
     if 'single' in sys.argv[1:]:

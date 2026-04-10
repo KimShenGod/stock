@@ -77,7 +77,7 @@ def celue_save(file_list, HS300_信号, tqdm_position=None):
                             * (len(file_list) - (file_list.index(stockcode) + 1)))
 
         # 提取celue是true的列，单独保存到一个df，返回这个df
-        df_celue = df_celue.append(df.loc[df['celue_buy'] | df['celue_sell']])
+        df_celue = pd.concat([df_celue, df.loc[df['celue_buy'] | df['celue_sell']]], ignore_index=True)
         # print(f'{process_info} 已用{(time.time() - starttime_tick):.2f}秒 剩余预计{lefttime_tick}秒')
     df_celue['date'] = pd.to_datetime(df_celue['date'], format='%Y-%m-%d')  # 转为时间格式
     df_celue.set_index('date', drop=False, inplace=True)  # 时间为索引。方便与另外复权的DF表对齐合并

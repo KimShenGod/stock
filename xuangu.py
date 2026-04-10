@@ -216,6 +216,90 @@ def load_dict_stock(stocklist):
     return dicttemp
 
 
+def run_strategy(stocklist, strategy_func, strategy_name, df_today=None, hs300_signal=None, df_gbbq=None, tqdm_position=None, mode='fast', extra_params=None):
+    """
+    通用的策略执行函数，替代重复的run_celue1-run_celue11函数
+    
+    :param stocklist: 股票代码列表
+    :param strategy_func: 策略函数
+    :param strategy_name: 策略名称（用于日志输出）
+    :param df_today: 当日行情数据（可选）
+    :param hs300_signal: 沪深300信号（可选）
+    :param df_gbbq: 股本变迁数据（可选）
+    :param tqdm_position: tqdm位置参数
+    :param mode: 策略模式（'fast'或空）
+    :param extra_params: 额外参数字典
+    :return: 符合条件的股票代码列表
+    """
+    if 'single' in sys.argv[1:]:
+        tq = tqdm(stocklist[:])
+    else:
+        # 多进程模式下不使用tqdm，避免死锁
+        tq = stocklist[:]
+    
+    # 创建一个新列表来存储有效的股票代码，避免在迭代中修改列表
+    valid_stocklist = []
+    
+    # 提前筛选df_today中当前股票列表的数据，避免在循环中重复筛选
+    df_today_filtered = df_today[df_today['code'].isin(stocklist)] if df_today is not None and not df_today.empty else None
+    
+    for stockcode in tq:
+        # 只有单进程模式下才更新进度条描述
+        if isinstance(tq, tqdm):
+            tq.set_description(stockcode)
+        pklfile = csvdaypath + os.sep + stockcode + '.pkl'
+        
+        try:
+            # 检查文件是否存在
+            if not os.path.exists(pklfile):
+                print(f'文件不存在: {pklfile}，跳过该股票')
+                continue
+            
+            df_stock = pd.read_pickle(pklfile)
+            
+            # 更新当前最新行情（如果提供）
+            if df_today_filtered is not None and not df_today_filtered.empty:
+                try:
+                    df_today_stock = df_today_filtered[df_today_filtered['code'] == stockcode]
+                    if not df_today_stock.empty:
+                        df_stock = func.update_stockquote(stockcode, df_stock, df_today_stock)
+                except Exception as e:
+                    print(f'更新{stockcode}实时行情失败: {e}，使用本地数据')
+            
+            df_stock['date'] = pd.to_datetime(df_stock['date'], format='%Y-%m-%d')  # 转为时间格式
+            df_stock.set_index('date', drop=False, inplace=True)  # 时间为索引
+            
+            try:
+                # 根据策略函数的不同参数要求，动态构建调用参数
+                if strategy_func.__name__ == 'stockSelectionStrategy':
+                    result = strategy_func(df_stock, start_date=start_date, end_date=end_date, mode=mode)
+                elif strategy_func.__name__ == 'buySignalStrategy' and hs300_signal is not None:
+                    result = strategy_func(df_stock, hs300_signal, start_date=start_date, end_date=end_date)
+                else:
+                    result = strategy_func(df_stock, start_date=start_date, end_date=end_date, mode=mode)
+                
+                # 检查结果是否为Series类型且不为空
+                if isinstance(result, pd.Series) and len(result) > 0:
+                    signal = result.iat[-1]
+                    if signal:
+                        valid_stocklist.append(stockcode)
+                elif isinstance(result, bool) and result:
+                    # 快速模式可能直接返回布尔值
+                    valid_stocklist.append(stockcode)
+                else:
+                    print(f'{stockcode} {strategy_name}返回无效结果，跳过该股票')
+            except IndexError as e:
+                print(f'{stockcode} {strategy_name}结果索引错误: {e}，跳过该股票')
+            except AttributeError as e:
+                print(f'{stockcode} {strategy_name}结果属性错误: {e}，跳过该股票')
+            except Exception as e:
+                print(f'{stockcode} {strategy_name}执行错误: {e}，跳过该股票')
+        except Exception as e:
+            print(f'处理{stockcode}时出错: {e}，跳过该股票')
+    
+    return valid_stocklist
+
+
 def run_celue1(stocklist, df_today, tqdm_position=None):
     if 'single' in sys.argv[1:]:
         tq = tqdm(stocklist[:])

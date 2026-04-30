@@ -904,6 +904,19 @@ def make_fq(code, df_code, df_gbbq, df_cw='', start_date='', end_date='', fqtype
     # df_ltg拼接回原DF
     data = pd.concat([data, df_ltg], axis=1)
 
+    # 如果财报数据中没有流通股数据，从gbbq.csv中获取作为后备
+    if '流通股' not in data.columns or data['流通股'].isna().all():
+        # 从df_gbbq中获取股本变化记录
+        df_gbbq_code = df_gbbq[df_gbbq['code'] == code]
+        # 筛选股本变化类型
+        df_gbbq_change = df_gbbq_code[df_gbbq_code['类别'] == '股本变化']
+        if not df_gbbq_change.empty:
+            # 获取最新的股本变化记录
+            latest_change = df_gbbq_change.iloc[-1]
+            # 使用"送转股-后流通盘"作为流通股数据
+            if '送转股-后流通盘' in latest_change and latest_change['送转股-后流通盘'] > 0:
+                data['流通股'] = latest_change['送转股-后流通盘']
+
     # 修复pandas新版本的fillna方法使用
     data = data.ffill().infer_objects(copy=False)  # 向下填充无效值 (替代fillna(method='ffill'))
     data = data.bfill().infer_objects(copy=False)  # 向上填充无效值  为了弥补开始几行的空值 (替代fillna(method='bfill'))

@@ -20,6 +20,22 @@ import pandas as pd
 import os
 import user_config as ucfg
 
+# ============== 策略注册系统 ==============
+_STRATEGY_REGISTRY = {}
+
+def register_strategy(name):
+    """
+    策略注册装饰器
+    用法：
+    @register_strategy("策略名称")
+    def my_strategy(df, ...):
+        ...
+    """
+    def decorator(func):
+        _STRATEGY_REGISTRY[name] = func
+        return func
+    return decorator
+
 # 判断今天是否是中国股市的交易日
 def is_trading_day():
     """
@@ -1107,11 +1123,9 @@ def macdWeeklyRangeStrategy(df, start_date='', end_date='', mode=None):
             (recent_macdhist.iloc[-1] > 0.05) & (recent_macdhist.iloc[-1] < 0.3)
         )
         
-        # 检查最近2周以上macd值是否逐步放大
-        # 最近2周是tail(3)[1:3]，即索引为1,2
-        macd_increasing = (
-            (recent_macdhist.iloc[1] < recent_macdhist.iloc[2])
-        )
+        # 检查最近2周以上macd值是否逐步放大（即最近一周比前一周大）
+        # recent_macdhist.iloc[2] 是最近一周，iloc[1] 是前一周
+        macd_increasing = (recent_macdhist.iloc[1] < recent_macdhist.iloc[2])
         
         # 获取股票代码，用于调试
         stock_code = df_copy['code'].iloc[0] if 'code' in df_copy.columns else 'unknown'
@@ -1220,7 +1234,7 @@ strategy_list = [
         "name": "macdWeeklyRange",
         "function": macdWeeklyRangeStrategy,
         "type": "selection",
-        "description": "周线MACD区间策略，筛选最近一周MACD、DIF、DEA同时大于0.05小于0.2且最近3周以上MACD值逐步放大的股票"
+        "description": "周线MACD区间策略，筛选最近一周MACD、DIF、DEA同时大于0.05小于0.2且最近2周以上MACD值逐步放大的股票"
     }
 ]
 
@@ -1240,7 +1254,7 @@ STRATEGY_ENUM = {
     '8': 'MACD周线金叉策略 - 筛选周线MACD指标出现金叉且在零轴上方的股票',
     '9': 'MACD日线金叉策略 - 筛选日线MACD指标出现金叉且在零轴上方的股票',
     '10': '持续上升且接近最高价策略 - 筛选最近三个交易日收盘价持续上升且每个交易日收盘价与最高价偏差在1个点以内的股票',
-    '11': '周线MACD区间策略 - 筛选最近一周MACD、DIF、DEA同时大于0.05小于0.2且最近3周以上MACD值逐步放大的股票'
+    '11': '周线MACD区间策略 - 筛选最近一周MACD、DIF、DEA同时大于0.05小于0.2且最近2周以上MACD值逐步放大的股票'
 }
 
 

@@ -51,17 +51,17 @@ except ImportError as e:
     sys.exit(1)
 
 # 配置通达信安装路径
-TDX_PATH = r"E:\Program Files\new_dfcf_v6"
+TDX_PATH = ucfg.tdx['tdx_path']
 VIPDOC_PATH = os.path.join(TDX_PATH, "vipdoc")
 HQ_CACHE_PATH = os.path.join(TDX_PATH, "T0002", "hq_cache")
 
 # 本地数据保存路径
 LOCAL_DATA_PATH = "TDXdata"
-CSV_LDAY_PATH = os.path.join(LOCAL_DATA_PATH, "lday_qfq")
-PICKLE_PATH = os.path.join(LOCAL_DATA_PATH, "pickle")
-CSV_INDEX_PATH = os.path.join(LOCAL_DATA_PATH, "index")
-CSV_CW_PATH = os.path.join(LOCAL_DATA_PATH, "cw")
-CSV_GBBQ_PATH = LOCAL_DATA_PATH
+CSV_LDAY_PATH = ucfg.tdx['csv_lday']
+PICKLE_PATH = ucfg.tdx['pickle']
+CSV_INDEX_PATH = ucfg.tdx['csv_index']
+CSV_CW_PATH = ucfg.tdx['csv_cw']
+CSV_GBBQ_PATH = ucfg.tdx['csv_gbbq']
 
 # 创建通达信数据目录结构
 def create_tdx_directories():
@@ -326,252 +326,402 @@ def download_latest_data():
         batch_size = 100
         total_batches = (len(stock_list) + batch_size - 1) // batch_size
         
-        # 快速检测参数：只检测前N个批次，如果都没有更新则提前退出
+        # 快速检测：检查前2个批次的day文件最新日期是否都等于目标日期
         quick_check_batches = 2
-        quick_check_done = False
+        quick_check_passed = False
         
-        for batch_idx in range(total_batches):
-            start_idx = batch_idx * batch_size
-            end_idx = min((batch_idx + 1) * batch_size, len(stock_list))
-            batch = stock_list[start_idx:end_idx]
+        # 统计已存在的day文件数量
+        existing_file_count = 0
+        for market_prefix, code in stock_list[:quick_check_batches * batch_size]:
+            if code.startswith('688'):
+                continue
+            target_file = os.path.join(VIPDOC_PATH, market_prefix, 'lday', f"{market_prefix}{code}.day")
+            if os.path.exists(target_file):
+                existing_file_count += 1
+        
+        if existing_file_count > 0 and total_batches >= quick_check_batches:
+            print(f"\n=== 开始快速检测 ===")
+            print(f"前{quick_check_batches}个批次中共有{existing_file_count}只股票有已存在的day文件")
+            all_up_to_date = True
+            checked_count = 0
             
-            print(f"处理批次 {batch_idx + 1}/{total_batches} ({start_idx + 1}-{end_idx}/{len(stock_list)})")
-            
-            # 如果是快速检测阶段且已有更新，说明数据可能需要全面检查
-            if quick_check_done and updated_count > 0:
-                quick_check_done = False
-            
-            for market_prefix, code in batch:
-                # 只处理主板和中小板股票，跳过科创板股票（688开头）
-                if code.startswith('688'):
-                    continue
+            for check_batch_idx in range(quick_check_batches):
+                start_idx = check_batch_idx * batch_size
+                end_idx = min((check_batch_idx + 1) * batch_size, len(stock_list))
+                batch = stock_list[start_idx:end_idx]
+                
+                for market_prefix, code in batch:
+                    if code.startswith('688'):
+                        continue
                     
-                try:
-                    # 确定市场代码
-                    market = 1 if market_prefix == 'sh' else 0
-                    
-                    # 构建目标文件路径
-                    data_path = os.path.join(VIPDOC_PATH, market_prefix, 'lday')
-                    ensure_dir(data_path)
-                    target_file = os.path.join(data_path, f"{market_prefix}{code}.day")
-                    
-                    # 检查现有文件，获取最后一条记录的日期（最新日期在文件末尾）
-                    last_date = None
-                    file_exists = os.path.exists(target_file)
-                    
-                    if file_exists:
+                    target_file = os.path.join(VIPDOC_PATH, market_prefix, 'lday', f"{market_prefix}{code}.day")
+                    if os.path.exists(target_file):
                         try:
                             with open(target_file, 'rb') as f:
-                                f.seek(0, 2)  # 定位到文件末尾
+                                f.seek(0, 2)
                                 file_size = f.tell()
                                 if file_size >= 32:
-                                    # 读取文件末尾的最后一条记录（最新数据）
-                                    f.seek(-32, 2)  # 定位到倒数第一条记录
+                                    f.seek(-32, 2)
                                     last_record = f.read(32)
                                     from struct import unpack
-                                    date = unpack('<IIIIIfII', last_record)[0]  # 读取日期字段
-                                    
-                                    # 验证日期有效性（19900101-20301231）
+                                    date = unpack('<IIIIIfII', last_record)[0]
                                     if 19900101 <= date <= 20301231:
-                                        last_date = date
-                                        # print(f"  检测到现有文件，最后日期: {last_date}")
-                                    else:
-                                        # 无效日期，将重新下载所有数据
-                                        print(f"  检测到无效日期: {date}，将重新下载所有数据")
-                                        last_date = None
-                                else:
-                                    print(f"  文件大小不足32字节，将重新下载所有数据")
-                                    last_date = None
+                                        if date != target_date_int:
+                                            print(f"  发现{market_prefix}{code}的最新日期为{date}，目标日期为{target_date_int}")
+                                            all_up_to_date = False
+                                            break
+                                    checked_count += 1
                         except Exception as e:
-                            print(f"  读取现有文件失败: {e}，将重新下载所有数据")
-                            last_date = None
-                    
-                    # 循环获取数据，每次获取500条
-                    all_data = []
-                    max_bars_per_request = 500
-                    current_offset = 0
-                    has_new_data = False
-                    
-                    while True:
-                        # 获取数据
-                        data = api.get_security_bars(9, market, code, current_offset, max_bars_per_request)
-                        if not data or len(data) == 0:
-                            break  # 没有更多数据了
-                        
-                        # 如果有last_date，只保留大于last_date的数据
-                        if last_date:
-                            filtered_data = []
-                            
-                            # 先解析所有数据的日期，方便排序和过滤
-                            data_with_dates = []
-                            for k_line in data:
-                                # 解析日期
-                                if 'datetime' in k_line:
-                                    # 新格式：2026-03-04 17:00
-                                    date_str = k_line['datetime'].split(' ')[0]  # 格式：YYYY-MM-DD
-                                    date_int = int(date_str.replace('-', ''))  # 转换为YYYYMMDD
-                                else:
-                                    # 旧格式：year/month/day字段
-                                    year = k_line.get('year', 0)
-                                    month = k_line.get('month', 0)
-                                    day = k_line.get('day', 0)
-                                    date_int = year * 10000 + month * 100 + day
-                                
-                                data_with_dates.append((date_int, k_line))
-                            
-                            # 按日期从新到旧排序
-                            data_with_dates.sort(key=lambda x: x[0], reverse=True)
-                            
-                            # 遍历排序后的数据，只保留大于last_date且小于等于目标日期的数据
-                            for date_int, k_line in data_with_dates:
-                                if date_int > last_date and date_int <= target_date_int:
-                                    filtered_data.append(k_line)
-                                elif date_int == last_date:
-                                    # 跳过重复日期
-                                    continue
-                                else:
-                                    # 数据已经是历史数据，无需继续遍历
-                                    break
-                            
-                            if filtered_data:
-                                all_data.extend(filtered_data)
-                                has_new_data = True
-                            else:
-                                # 没有新数据，停止下载
-                                break
-                        else:
-                            # 没有last_date，下载数据但只保留小于等于目标日期的数据
-                            # 先解析所有数据的日期，方便排序和过滤
-                            data_with_dates = []
-                            for k_line in data:
-                                # 解析日期
-                                if 'datetime' in k_line:
-                                    # 新格式：2026-03-04 17:00
-                                    date_str = k_line['datetime'].split(' ')[0]  # 格式：YYYY-MM-DD
-                                    date_int = int(date_str.replace('-', ''))  # 转换为YYYYMMDD
-                                else:
-                                    # 旧格式：year/month/day字段
-                                    year = k_line.get('year', 0)
-                                    month = k_line.get('month', 0)
-                                    day = k_line.get('day', 0)
-                                    date_int = year * 10000 + month * 100 + day
-                                
-                                data_with_dates.append((date_int, k_line))
-                            
-                            # 按日期从新到旧排序
-                            data_with_dates.sort(key=lambda x: x[0], reverse=True)
-                            
-                            # 只保留小于等于目标日期的数据
-                            filtered_data = []
-                            for date_int, k_line in data_with_dates:
-                                if date_int <= target_date_int:
-                                    filtered_data.append(k_line)
-                                else:
-                                    continue
-                            
-                            if filtered_data:
-                                all_data.extend(filtered_data)
-                                has_new_data = True
-                        
-                        # 如果获取的数据不足max_bars_per_request，说明已经获取完所有数据
-                        if len(data) < max_bars_per_request:
-                            break
-                        
-                        # 更新偏移量，获取下一批数据
-                        current_offset += max_bars_per_request
-                    
-                    if has_new_data and all_data:
-                        # 为每条数据添加日期字段，用于排序
-                        for k_line in all_data:
-                            if 'datetime' in k_line:
-                                date_str = k_line['datetime'].split(' ')[0]  # 格式：YYYY-MM-DD
-                                k_line['sort_date'] = int(date_str.replace('-', ''))  # 转换为YYYYMMDD
-                            else:
-                                year = k_line.get('year', 0)
-                                month = k_line.get('month', 0)
-                                day = k_line.get('day', 0)
-                                k_line['sort_date'] = year * 10000 + month * 100 + day
-                        
-                        # 过滤掉无效日期记录
-                        valid_data = []
-                        for data in all_data:
-                            date = data['sort_date']
-                            # 只保留有效的日期范围（19900101-20301231）
-                            if 19900101 <= date <= 20301231:
-                                valid_data.append(data)
-                        all_data = valid_data
-                        
-                        if not all_data:
-                            print(f"  没有有效数据，跳过")
+                            print(f"  读取{market_prefix}{code}的day文件失败: {e}")
+                if not all_up_to_date:
+                    break
+            
+            if all_up_to_date and checked_count > 0:
+                print(f"快速检测完成：前{quick_check_batches}个批次({checked_count}只股票)的day文件最新日期均为{target_date_int}")
+                print(f"判定所有股票日线数据已是最新，跳过个股日线更新")
+                quick_check_passed = True
+            else:
+                if checked_count == 0:
+                    print(f"快速检测完成：前{quick_check_batches}个批次中没有找到可读取的day文件，继续处理所有批次")
+                else:
+                    print(f"快速检测完成：发现{checked_count}只股票中有日期不等于{target_date_int}的，继续处理所有批次")
+        else:
+            print(f"\n=== 快速检测跳过 ===")
+            print(f"前{quick_check_batches}个批次中只有{existing_file_count}只股票有已存在的day文件，跳过快速检测")
+        
+        if not quick_check_passed:
+            for batch_idx in range(total_batches):
+                start_idx = batch_idx * batch_size
+                end_idx = min((batch_idx + 1) * batch_size, len(stock_list))
+                batch = stock_list[start_idx:end_idx]
+                
+                print(f"处理批次 {batch_idx + 1}/{total_batches} ({start_idx + 1}-{end_idx}/{len(stock_list)})")
+                
+                for market_prefix, code in batch:
+                    # 只处理A股股票，跳过其他类型
+                    # 沪市A股：600、601、603、605开头
+                    # 深市A股：000、001、002、300、301、302开头
+                    # 跳过：科创板(688)、债券、基金等
+                    if market_prefix == 'sh':
+                        # 沪市A股
+                        if not (code.startswith('600') or code.startswith('601') or code.startswith('603') or code.startswith('605')):
+                            continue
+                    else:
+                        # 深市A股
+                        if not (code.startswith('000') or code.startswith('001') or code.startswith('002') or code.startswith('300') or code.startswith('301') or code.startswith('302')):
                             continue
                         
-                        # 按日期从旧到新排序（追加模式需要旧数据在前）
-                        all_data.sort(key=lambda x: x['sort_date'])
+                    try:
+                        # 确定市场代码
+                        market = 1 if market_prefix == 'sh' else 0
+                        
+                        # 构建目标文件路径
+                        data_path = os.path.join(VIPDOC_PATH, market_prefix, 'lday')
+                        ensure_dir(data_path)
+                        target_file = os.path.join(data_path, f"{market_prefix}{code}.day")
+                        
+                        # 检查现有文件，获取最后一条记录的日期（最新日期在文件末尾）
+                        last_date = None
+                        file_exists = os.path.exists(target_file)
                         
                         if file_exists:
-                            # 追加模式：新数据追加到文件末尾（最新日期在后面）
-                            # all_data 已经按从旧到新排序，直接追加即可
                             try:
-                                with open(target_file, 'ab') as f:
-                                    for k_line in all_data:
-                                        # 解析日期
-                                        date_int = k_line['sort_date']
+                                with open(target_file, 'rb') as f:
+                                    f.seek(0, 2)  # 定位到文件末尾
+                                    file_size = f.tell()
+                                    if file_size >= 32:
+                                        # 读取文件末尾的最后一条记录（最新数据）
+                                        f.seek(-32, 2)  # 定位到文件末尾前32字节
+                                        last_record = f.read(32)
+                                        from struct import unpack
+                                        date = unpack('<IIIIIfII', last_record)[0]  # 读取日期字段
                                         
-                                        # 价格转换（实际价格×100）
-                                        open_price = int(k_line.get('open', 0) * 100)
-                                        high_price = int(k_line.get('high', 0) * 100)
-                                        low_price = int(k_line.get('low', 0) * 100)
-                                        close_price = int(k_line.get('close', 0) * 100)
-                                        
-                                        # 成交量和成交额
-                                        volume = int(k_line.get('vol', 0))
-                                        amount = k_line.get('amount', 0)
-                                        
-                                        # 预留字段
-                                        reserve = 0
-                                        
-                                        # 打包为二进制数据，格式：<IIIIIfII
-                                        from struct import pack
-                                        record = pack('<IIIIIfII', 
-                                                    date_int, open_price, high_price, low_price, 
-                                                    close_price, amount, volume, reserve)
+                                        # 验证日期有效性（19900101-20301231）
+                                        if 19900101 <= date <= 20301231:
+                                            last_date = date
+                                            # print(f"  检测到现有文件，最后日期: {last_date}")
+                                        else:
+                                            # 无效日期，将重新下载所有数据
+                                            print(f"  检测到无效日期: {date}，将重新下载所有数据")
+                                            last_date = None
+                                    else:
+                                        print(f"  文件大小不足32字节，将重新下载所有数据")
+                                        last_date = None
+                            except Exception as e:
+                                print(f"  读取现有文件失败: {e}，将重新下载所有数据")
+                                last_date = None
+                        
+                        # 循环获取数据，每次获取500条
+                        all_data = []
+                        max_bars_per_request = 500
+                        current_offset = 0
+                        has_new_data = False
+                        
+                        while True:
+                            # 获取数据
+                            data = api.get_security_bars(9, market, code, current_offset, max_bars_per_request)
+                            if not data or len(data) == 0:
+                                break  # 没有更多数据了
+                            
+                            # 如果有last_date，只保留大于last_date的数据
+                            if last_date:
+                                filtered_data = []
+                                
+                                # 先解析所有数据的日期，方便排序和过滤
+                                data_with_dates = []
+                                for k_line in data:
+                                    # 解析日期
+                                    if 'datetime' in k_line:
+                                        # 新格式：2026-03-04 17:00
+                                        date_str = k_line['datetime'].split(' ')[0]  # 格式：YYYY-MM-DD
+                                        date_int = int(date_str.replace('-', ''))  # 转换为YYYYMMDD
+                                    else:
+                                        # 旧格式：year/month/day字段
+                                        year = k_line.get('year', 0)
+                                        month = k_line.get('month', 0)
+                                        day = k_line.get('day', 0)
+                                        date_int = year * 10000 + month * 100 + day
+                                    
+                                    data_with_dates.append((date_int, k_line))
+                                
+                                # 按日期从新到旧排序
+                                data_with_dates.sort(key=lambda x: x[0], reverse=True)
+                                
+                                # 遍历排序后的数据，只保留大于last_date且小于等于目标日期的数据
+                                for date_int, k_line in data_with_dates:
+                                    if date_int > last_date and date_int <= target_date_int:
+                                        filtered_data.append(k_line)
+                                    elif date_int == last_date:
+                                        # 跳过重复日期
+                                        continue
+                                    else:
+                                        # 数据已经是历史数据，无需继续遍历
+                                        break
+                                
+                                if filtered_data:
+                                    all_data.extend(filtered_data)
+                                    has_new_data = True
+                                else:
+                                    # 没有新数据，停止下载
+                                    break
+                            else:
+                                # 没有last_date，下载数据但只保留小于等于目标日期的数据
+                                # 先解析所有数据的日期，方便排序和过滤
+                                data_with_dates = []
+                                for k_line in data:
+                                    # 解析日期
+                                    if 'datetime' in k_line:
+                                        # 新格式：2026-03-04 17:00
+                                        date_str = k_line['datetime'].split(' ')[0]  # 格式：YYYY-MM-DD
+                                        date_int = int(date_str.replace('-', ''))  # 转换为YYYYMMDD
+                                    else:
+                                        # 旧格式：year/month/day字段
+                                        year = k_line.get('year', 0)
+                                        month = k_line.get('month', 0)
+                                        day = k_line.get('day', 0)
+                                        date_int = year * 10000 + month * 100 + day
+                                    
+                                    data_with_dates.append((date_int, k_line))
+                                
+                                # 按日期从新到旧排序
+                                data_with_dates.sort(key=lambda x: x[0], reverse=True)
+                                
+                                # 只保留小于等于目标日期的数据
+                                filtered_data = []
+                                for date_int, k_line in data_with_dates:
+                                    if date_int <= target_date_int:
+                                        filtered_data.append(k_line)
+                                    else:
+                                        continue
+                                
+                                if filtered_data:
+                                    all_data.extend(filtered_data)
+                                    has_new_data = True
+                            
+                            # 如果获取的数据不足max_bars_per_request，说明已经获取完所有数据
+                            if len(data) < max_bars_per_request:
+                                break
+                            
+                            # 更新偏移量，获取下一批数据
+                            current_offset += max_bars_per_request
+                        
+                        if has_new_data and all_data:
+                            # 对所有数据按照日期从旧到新进行排序，确保顺序正确
+                            # 为每条数据添加日期字段，用于排序
+                            for k_line in all_data:
+                                if 'datetime' in k_line:
+                                    date_str = k_line['datetime'].split(' ')[0]  # 格式：YYYY-MM-DD
+                                    k_line['sort_date'] = int(date_str.replace('-', ''))  # 转换为YYYYMMDD
+                                else:
+                                    year = k_line.get('year', 0)
+                                    month = k_line.get('month', 0)
+                                    day = k_line.get('day', 0)
+                                    k_line['sort_date'] = year * 10000 + month * 100 + day
+                            
+                            # 按照日期从旧到新排序
+                            all_data.sort(key=lambda x: x['sort_date'])
+                            
+                            # 过滤掉无效日期记录
+                            valid_data = []
+                            for data in all_data:
+                                date = data['sort_date']
+                                # 只保留有效的日期范围（19900101-20301231）
+                                if 19900101 <= date <= 20301231:
+                                    valid_data.append(data)
+                            all_data = valid_data
+                            
+                            if not all_data:
+                                # 如果没有新数据且文件已存在，直接跳过（保留原文件）
+                                if file_exists:
+                                    print(f"  {market_prefix}{code} 没有新数据，跳过")
+                                    success_count += 1
+                                else:
+                                    print(f"  {market_prefix}{code} 没有有效数据，跳过")
+                                continue
+                            
+                            # 初始化现有数据列表
+                            existing_data = []
+                            
+                            if file_exists:
+                                # 追加模式：需要先读取现有文件，将现有数据与新数据合并，然后重新写入
+                                try:
+                                    with open(target_file, 'rb') as f:
+                                        while True:
+                                            record = f.read(32)
+                                            if not record or len(record) != 32:
+                                                break
+                                            # 验证现有记录的日期有效性
+                                            from struct import unpack
+                                            try:
+                                                date = unpack('<I', record[0:4])[0]
+                                                # 只保留有效的日期范围（19900101-20301231）
+                                                if 19900101 <= date <= 20301231:
+                                                    existing_data.append(record)
+                                            except Exception:
+                                                # 跳过无效记录
+                                                continue
+                                except Exception as e:
+                                    print(f"  读取现有文件失败: {e}，将重新下载所有数据")
+                            
+                            # 现有数据在前，新数据在后，保持最新数据在末尾
+                            all_records = []
+                            
+                            # 添加现有数据
+                            all_records.extend(existing_data)
+                            
+                            # 打包新数据
+                            from struct import pack
+                            for k_line in all_data:
+                                # 解析日期
+                                date_int = k_line['sort_date']
+                                
+                                # 价格转换（实际价格×100）
+                                open_price = int(k_line.get('open', 0) * 100)
+                                high_price = int(k_line.get('high', 0) * 100)
+                                low_price = int(k_line.get('low', 0) * 100)
+                                close_price = int(k_line.get('close', 0) * 100)
+                                
+                                # 成交量和成交额
+                                volume = int(k_line.get('vol', 0))
+                                amount = k_line.get('amount', 0)
+                                
+                                # 预留字段
+                                reserve = 0
+                                
+                                # 打包为二进制数据，格式：<IIIIIfII
+                                record = pack('<IIIIIfII', 
+                                            date_int, open_price, high_price, low_price, 
+                                            close_price, amount, volume, reserve)
+                                all_records.append(record)
+                            
+                            # 重新写入整个文件
+                            try:
+                                with open(target_file, 'wb') as f:
+                                    for record in all_records:
                                         f.write(record)
-                                mode = 'ab'
+                                
+                                mode = 'ab'  # 实际是重写，但保持operation显示为追加
                             except PermissionError as e:
-                                print(f"  写入文件失败: {e}，尝试删除后重新创建")
+                                print(f"  写入文件失败: {e}，尝试以只读方式打开失败，将尝试其他方法")
+                                # 尝试先删除文件，然后重新创建
                                 try:
                                     os.remove(target_file)
                                     with open(target_file, 'wb') as f:
+                                        for record in all_records:
+                                            f.write(record)
+                                    mode = 'ab'
+                                    print(f"  成功删除并重新创建文件")
+                                except Exception as e2:
+                                    print(f"  删除并重新创建文件失败: {e2}，将跳过该文件")
+                                    continue
+                            except Exception as e:
+                                print(f"  合并数据失败: {e}，将重新下载所有数据")
+                                # 重新下载所有数据
+                                from struct import pack
+                                try:
+                                    with open(target_file, 'wb') as f:
                                         for k_line in all_data:
+                                            # 解析日期
                                             date_int = k_line['sort_date']
+                                            
+                                            # 价格转换（实际价格×100）
                                             open_price = int(k_line.get('open', 0) * 100)
                                             high_price = int(k_line.get('high', 0) * 100)
                                             low_price = int(k_line.get('low', 0) * 100)
                                             close_price = int(k_line.get('close', 0) * 100)
+                                            
+                                            # 成交量和成交额
                                             volume = int(k_line.get('vol', 0))
                                             amount = k_line.get('amount', 0)
+                                            
+                                            # 预留字段
                                             reserve = 0
-                                            from struct import pack
+                                            
+                                            # 打包为二进制数据，格式：<IIIIIfII
                                             record = pack('<IIIIIfII', 
                                                         date_int, open_price, high_price, low_price, 
                                                         close_price, amount, volume, reserve)
                                             f.write(record)
                                     mode = 'wb'
-                                    print(f"  成功删除并重新创建文件")
-                                except Exception as e2:
-                                    print(f"  追加数据失败: {e2}，将跳过该文件")
-                                    continue
-                            except Exception as e:
-                                print(f"  追加数据失败: {e}，将跳过该文件")
-                                continue
+                                except PermissionError as e:
+                                    print(f"  写入文件失败: {e}，尝试以只读方式打开失败，将尝试其他方法")
+                                    # 尝试先删除文件，然后重新创建
+                                    try:
+                                        os.remove(target_file)
+                                        with open(target_file, 'wb') as f:
+                                            for k_line in all_data:
+                                                # 解析日期
+                                                date_int = k_line['sort_date']
+                                                
+                                                # 价格转换（实际价格×100）
+                                                open_price = int(k_line.get('open', 0) * 100)
+                                                high_price = int(k_line.get('high', 0) * 100)
+                                                low_price = int(k_line.get('low', 0) * 100)
+                                                close_price = int(k_line.get('close', 0) * 100)
+                                                
+                                                # 成交量和成交额
+                                                volume = int(k_line.get('vol', 0))
+                                                amount = k_line.get('amount', 0)
+                                                
+                                                # 预留字段
+                                                reserve = 0
+                                                
+                                                # 打包为二进制数据，格式：<IIIIIfII
+                                                record = pack('<IIIIIfII', 
+                                                            date_int, open_price, high_price, low_price, 
+                                                            close_price, amount, volume, reserve)
+                                                f.write(record)
+                                        mode = 'wb'
+                                        print(f"  成功删除并重新创建文件")
+                                    except Exception as e2:
+                                        print(f"  删除并重新创建文件失败: {e2}，将跳过该文件")
+                                        continue
                         else:
-                            # 新文件：直接写入，按日期从旧到新排序（方便追加）
+                            # 新文件：直接写入，保持API返回的从新到旧顺序
                             mode = 'wb'
                             from struct import pack
-                            # 先按日期从旧到新排序（追加模式需要旧数据在前）
-                            all_data_sorted = sorted(all_data, key=lambda x: x['sort_date'])
                             with open(target_file, mode) as f:
-                                for k_line in all_data_sorted:
+                                for k_line in all_data:
                                     # 解析日期
                                     date_int = k_line['sort_date']
                                     
@@ -600,38 +750,47 @@ def download_latest_data():
                         
                         updated_count += 1
                         success_count += 1
-                    elif file_exists:
-                        # print(f"  {market_prefix}{code} 没有新数据，跳过")
-                        success_count += 1
-                    else:
+                    except Exception as e:
                         fail_count += 1
-                except Exception as e:
-                    fail_count += 1
-                    # 跳过失败的股票，继续处理下一个
-                    continue
-            
-            # 批次处理完成，检查是否需要提前退出
-            if not quick_check_done and batch_idx + 1 >= quick_check_batches:
-                # 快速检测完成（已处理完前N个批次）
-                if updated_count == 0:
-                    # 前N个批次都没有更新，提前退出
-                    remaining_batches = total_batches - (batch_idx + 1)
-                    print(f"\n=== 快速检测完成：前{quick_check_batches}个批次共{end_idx}只股票均无更新 ===")
-                    print(f"=== 判定所有{len(stock_list)}只股票日线数据已是最新，跳过剩余{remaining_batches}个批次 ===\n")
-                    quick_check_done = True
-                    break
-                else:
-                    # 发现有更新，继续处理所有批次
-                    quick_check_done = True
-                    print(f"\n=== 发现{updated_count}只股票有更新，继续处理所有批次 ===\n")
+                        # 打印失败信息
+                        print(f"  处理 {market_prefix}{code} 失败: {str(e)}")
+                        # 跳过失败的股票，继续处理下一个
+                        continue
         
         print(f"数据下载完成，成功: {success_count} 只，更新: {updated_count} 只，失败: {fail_count} 只")
+        
+        # 删除0KB的day文件
+        print("\n清理0KB的day文件...")
+        zero_kb_count = 0
+        for market_prefix in ['sh', 'sz']:
+            lday_path = os.path.join(VIPDOC_PATH, market_prefix, 'lday')
+            if os.path.exists(lday_path):
+                for file in os.listdir(lday_path):
+                    if file.endswith('.day'):
+                        file_path = os.path.join(lday_path, file)
+                        try:
+                            if os.path.getsize(file_path) == 0:
+                                os.remove(file_path)
+                                zero_kb_count += 1
+                        except Exception as e:
+                            print(f"  删除 {file_path} 失败: {e}")
+        if zero_kb_count > 0:
+            print(f"  已删除 {zero_kb_count} 个0KB的day文件")
+        else:
+            print("  没有发现0KB的day文件")
         
         # 下载指数数据
         print("\n正在下载指数数据...")
         
-        # 初始化Baostock
-        bs.login()
+        # 使用Baostock获取指数数据
+        print("  使用Baostock获取指数数据")
+        bs.login_result = bs.login()
+        if bs.login_result.error_code != '0':
+            print(f"  Baostock登录失败: {bs.login_result.error_msg}")
+            print("  无法获取指数数据，请检查网络连接或稍后重试")
+            return
+        else:
+            print("  Baostock登录成功")
         
         indices = [
             ('sh', '000001'),  # 上证指数
@@ -653,46 +812,30 @@ def download_latest_data():
                 ensure_dir(data_path)
                 target_file = os.path.join(data_path, f"{market_prefix}{code}.day")
                 
-                # 检查现有文件，获取最后一条记录的日期（最新日期在文件末尾）
-                last_date = None
+                # 指数数据采用全量下载模式
                 file_exists = os.path.exists(target_file)
-                
                 if file_exists:
-                    try:
-                        with open(target_file, 'rb') as f:
-                            f.seek(0, 2)  # 定位到文件末尾
-                            file_size = f.tell()
-                            if file_size >= 32:
-                                # 读取文件末尾的最后一条记录（最新数据）
-                                f.seek(-32, 2)  # 定位到倒数第一条记录
-                                last_record = f.read(32)
-                                from struct import unpack
-                                date = unpack('<IIIIIfII', last_record)[0]  # 读取日期字段
-                                
-                                # 验证日期有效性（19900101-20301231）
-                                if 19900101 <= date <= 20301231:
-                                    last_date = date
-                                    # print(f"  检测到现有文件，最后日期: {last_date}")
-                                else:
-                                    # 无效日期，将重新下载所有数据
-                                    print(f"  检测到无效日期: {date}，将重新下载所有数据")
-                                    last_date = None
-                            else:
-                                print(f"  文件大小不足32字节，将重新下载所有数据")
-                    except Exception as e:
-                        print(f"  读取现有文件失败: {e}，将重新下载所有数据")
-                
-                # 构建Baostock代码
-                baostock_code = f"{market_prefix}.{code}"
+                    print(f"  检测到现有文件，将进行全量更新覆盖")
+                else:
+                    print(f"  未检测到现有文件，将下载全部历史数据")
                 
                 # 设置开始日期
                 start_date = "1990-01-01"
                 
                 # 设置结束日期为目标日期的YYYY-MM-DD格式
                 end_date = datetime.datetime.strptime(str(target_date_int), "%Y%m%d").strftime("%Y-%m-%d")
+                
+                # 处理返回结果
+                all_data = []
+                max_date = None
+                total_rows = 0
+                processed_rows = 0
+                
+                # 使用Baostock获取指数数据（优先）
+                baostock_code = f"{market_prefix}.{code}"
+                print(f"  使用Baostock获取指数 {market_prefix}{code} 的数据")
                 print(f"  Baostock API调用参数: code={baostock_code}, start_date={start_date}, end_date={end_date}")
                 
-                # 使用Baostock获取指数数据
                 rs = bs.query_history_k_data_plus(
                     baostock_code,
                     "date,open,high,low,close,volume,amount",
@@ -702,39 +845,24 @@ def download_latest_data():
                     adjustflag="3"  # 3：不复权
                 )
                 
-                # 处理返回结果
-                all_data = []
-                max_date = None
-                total_rows = 0
-                processed_rows = 0
                 while (rs.error_code == '0') & rs.next():
                     total_rows += 1
-                    # 获取一条记录，将记录合并在一起
                     row = rs.get_row_data()
-                    # 转换数据格式
-                    date_str = row[0]  # 日期格式：YYYY-MM-DD
+                    date_str = row[0]
                     date_int = int(date_str.replace('-', ''))
                     
-                    # 跟踪最大日期
                     if max_date is None or date_int > max_date:
                         max_date = date_int
                     
-                    # 只保留大于last_date且小于等于目标日期的数据
-                    if last_date and date_int <= last_date:
-                        continue
                     if date_int > target_date_int:
                         continue
                     
                     processed_rows += 1
-                    # 检查数据是否有效，处理空字符串情况
                     try:
-                        # 转换价格数据，处理空字符串
                         open_price = float(row[1]) if row[1] != '' else 0.0
                         high_price = float(row[2]) if row[2] != '' else 0.0
                         low_price = float(row[3]) if row[3] != '' else 0.0
                         close_price = float(row[4]) if row[4] != '' else 0.0
-                        
-                        # 转换成交量和成交额，处理空字符串
                         volume = float(row[5]) if row[5] != '' else 0.0
                         amount = float(row[6]) if row[6] != '' else 0.0
                         
@@ -748,14 +876,16 @@ def download_latest_data():
                             'vol': int(volume),
                             'amount': amount
                         })
-                    except ValueError as e:
+                    except Exception as e:
                         print(f"  跳过无效数据行: {e}, 行数据: {row}")
                         continue
-                
+
                 print(f"  Baostock返回总行数: {total_rows}, 处理后行数: {processed_rows}, 最大日期: {max_date}, 目标日期: {target_date_int}")
                 
-                # 如果有数据，标记有新数据
+                # 如果有数据，按照日期从旧到新排序
                 if all_data:
+                    all_data.sort(key=lambda x: x['sort_date'])
+                    print(f"  排序后数据范围: {all_data[0]['sort_date']} 到 {all_data[-1]['sort_date']}")
                     has_new_data = True
                 else:
                     print(f"  没有新数据需要更新")
@@ -767,191 +897,67 @@ def download_latest_data():
                     print(f"  这可能是因为 {target_date_int} 是非交易日或数据尚未更新")
                 
                 if has_new_data and all_data:
-                    # 按日期从旧到新排序（追加模式需要旧数据在前）
-                    all_data.sort(key=lambda x: x['sort_date'])
-                    print(f"  排序后数据范围: {all_data[0]['sort_date']} 到 {all_data[-1]['sort_date']}")
-                    
-                    if file_exists:
-                        # 追加模式：新数据追加到文件末尾（最新日期在后面）
-                        # all_data 已经按从旧到新排序，直接追加即可
-                        try:
-                            new_records_count = 0
-                            with open(target_file, 'ab') as f:
-                                from struct import pack
-                                import math
-                                for k_line in all_data:
-                                    try:
-                                        # 解析日期
-                                        date_int = k_line['sort_date']
-                                        
-                                        # 检查价格有效性（确保价格为正数且合理）
-                                        open_p = k_line.get('open', 0)
-                                        high_p = k_line.get('high', 0)
-                                        low_p = k_line.get('low', 0)
-                                        close_p = k_line.get('close', 0)
-                                        
-                                        if open_p <= 0 or high_p <= 0 or low_p <= 0 or close_p <= 0:
-                                            continue  # 跳过无效数据
-                                        
-                                        # 价格转换（实际价格×100）
-                                        open_price = int(round(open_p * 100))
-                                        high_price = int(round(high_p * 100))
-                                        low_price = int(round(low_p * 100))
-                                        close_price = int(round(close_p * 100))
-                                        
-                                        # 成交量和成交额处理
-                                        volume = int(k_line.get('vol', 0))
-                                        
-                                        # 检查所有整数字段是否在范围内
-                                        date_int = max(0, min(date_int, 4294967295))
-                                        open_price = max(0, min(open_price, 4294967295))
-                                        high_price = max(0, min(high_price, 4294967295))
-                                        low_price = max(0, min(low_price, 4294967295))
-                                        close_price = max(0, min(close_price, 4294967295))
-                                        volume = max(0, min(volume, 4294967295))
-                                        
-                                        # 获取amount值
-                                        amount = k_line.get('amount', 0)
-                                        
-                                        # 检查amount是否为有效浮点数
-                                        if math.isnan(amount) or math.isinf(amount):
-                                            amount = 0.0
-                                        else:
-                                            # 限制amount在float可表示的合理范围内
-                                            amount = max(-1e38, min(amount, 1e38))
-                                        
-                                        # 预留字段
-                                        reserve = 0
-                                        
-                                        # 打包为二进制数据，格式：<IIIIIfII
-                                        record = pack('<IIIIIfII', 
-                                                    date_int, open_price, high_price, low_price, 
-                                                    close_price, amount, volume, reserve)
-                                        
-                                        # 追加写入文件
-                                        f.write(record)
-                                        new_records_count += 1
-                                    except Exception as e:
-                                        print(f"  处理数据失败: {e}")
-                                        continue
-                            mode = 'ab'
-                        except PermissionError as e:
-                            print(f"  追加文件失败: {e}，尝试删除后重新创建")
+                    # 指数数据采用全量覆盖模式
+                    mode = 'wb'
+                    new_records_count = 0
+                    from struct import pack
+                    with open(target_file, mode) as f:
+                        for k_line in all_data:
                             try:
-                                os.remove(target_file)
-                                new_records_count = 0
-                                from struct import pack
+                                # 解析日期
+                                date_int = k_line['sort_date']
+                                
+                                # 检查价格有效性（确保价格为正数且合理）
+                                open_p = k_line.get('open', 0)
+                                high_p = k_line.get('high', 0)
+                                low_p = k_line.get('low', 0)
+                                close_p = k_line.get('close', 0)
+                                
+                                if open_p <= 0 or high_p <= 0 or low_p <= 0 or close_p <= 0:
+                                    continue  # 跳过无效数据
+                                
+                                # 价格转换（实际价格×100）
+                                open_price = int(round(open_p * 100))
+                                high_price = int(round(high_p * 100))
+                                low_price = int(round(low_p * 100))
+                                close_price = int(round(close_p * 100))
+                                
+                                # 成交量和成交额处理
                                 import math
-                                with open(target_file, 'wb') as f:
-                                    for k_line in all_data:
-                                        try:
-                                            date_int = k_line['sort_date']
-                                            open_p = k_line.get('open', 0)
-                                            high_p = k_line.get('high', 0)
-                                            low_p = k_line.get('low', 0)
-                                            close_p = k_line.get('close', 0)
-                                            
-                                            if open_p <= 0 or high_p <= 0 or low_p <= 0 or close_p <= 0:
-                                                continue
-                                            
-                                            open_price = int(round(open_p * 100))
-                                            high_price = int(round(high_p * 100))
-                                            low_price = int(round(low_p * 100))
-                                            close_price = int(round(close_p * 100))
-                                            volume = int(k_line.get('vol', 0))
-                                            
-                                            date_int = max(0, min(date_int, 4294967295))
-                                            open_price = max(0, min(open_price, 4294967295))
-                                            high_price = max(0, min(high_price, 4294967295))
-                                            low_price = max(0, min(low_price, 4294967295))
-                                            close_price = max(0, min(close_price, 4294967295))
-                                            volume = max(0, min(volume, 4294967295))
-                                            
-                                            amount = k_line.get('amount', 0)
-                                            if math.isnan(amount) or math.isinf(amount):
-                                                amount = 0.0
-                                            else:
-                                                amount = max(-1e38, min(amount, 1e38))
-                                            
-                                            record = pack('<IIIIIfII', 
-                                                        date_int, open_price, high_price, low_price, 
-                                                        close_price, amount, volume, 0)
-                                            f.write(record)
-                                            new_records_count += 1
-                                        except Exception as e:
-                                            continue
-                                mode = 'wb'
-                                print(f"  成功删除并重新创建文件")
-                            except Exception as e2:
-                                print(f"  创建文件失败: {e2}，将跳过该文件")
+                                volume = int(k_line.get('vol', 0))
+                                
+                                # 检查所有整数字段是否在范围内
+                                date_int = max(0, min(date_int, 4294967295))
+                                open_price = max(0, min(open_price, 4294967295))
+                                high_price = max(0, min(high_price, 4294967295))
+                                low_price = max(0, min(low_price, 4294967295))
+                                close_price = max(0, min(close_price, 4294967295))
+                                volume = max(0, min(volume, 4294967295))
+                                
+                                # 获取amount值
+                                amount = k_line.get('amount', 0)
+                                
+                                # 检查amount是否为有效浮点数
+                                if math.isnan(amount) or math.isinf(amount):
+                                    amount = 0.0
+                                else:
+                                    # 限制amount在float可表示的合理范围内
+                                    amount = max(-1e38, min(amount, 1e38))
+                                
+                                # 预留字段
+                                reserve = 0
+                                
+                                # 打包为二进制数据，格式：<IIIIIfII
+                                record = pack('<IIIIIfII', 
+                                            date_int, open_price, high_price, low_price, 
+                                            close_price, amount, volume, reserve)
+                                
+                                # 写入文件
+                                f.write(record)
+                                new_records_count += 1
+                            except Exception as e:
+                                print(f"  处理数据失败: {e}")
                                 continue
-                        except Exception as e:
-                            print(f"  追加数据失败: {e}，将跳过该文件")
-                            continue
-                    else:
-                        # 新文件：按日期从旧到新排序写入（方便后续追加）
-                        mode = 'wb'
-                        new_records_count = 0
-                        from struct import pack
-                        import math
-                        # 按日期从旧到新排序
-                        all_data_sorted = sorted(all_data, key=lambda x: x['sort_date'])
-                        with open(target_file, mode) as f:
-                            for k_line in all_data_sorted:
-                                try:
-                                    # 解析日期
-                                    date_int = k_line['sort_date']
-                                    
-                                    # 检查价格有效性（确保价格为正数且合理）
-                                    open_p = k_line.get('open', 0)
-                                    high_p = k_line.get('high', 0)
-                                    low_p = k_line.get('low', 0)
-                                    close_p = k_line.get('close', 0)
-                                    
-                                    if open_p <= 0 or high_p <= 0 or low_p <= 0 or close_p <= 0:
-                                        continue  # 跳过无效数据
-                                    
-                                    # 价格转换（实际价格×100）
-                                    open_price = int(round(open_p * 100))
-                                    high_price = int(round(high_p * 100))
-                                    low_price = int(round(low_p * 100))
-                                    close_price = int(round(close_p * 100))
-                                    
-                                    # 成交量和成交额处理
-                                    volume = int(k_line.get('vol', 0))
-                                    
-                                    # 检查所有整数字段是否在范围内
-                                    date_int = max(0, min(date_int, 4294967295))
-                                    open_price = max(0, min(open_price, 4294967295))
-                                    high_price = max(0, min(high_price, 4294967295))
-                                    low_price = max(0, min(low_price, 4294967295))
-                                    close_price = max(0, min(close_price, 4294967295))
-                                    volume = max(0, min(volume, 4294967295))
-                                    
-                                    # 获取amount值
-                                    amount = k_line.get('amount', 0)
-                                    
-                                    # 检查amount是否为有效浮点数
-                                    if math.isnan(amount) or math.isinf(amount):
-                                        amount = 0.0
-                                    else:
-                                        # 限制amount在float可表示的合理范围内
-                                        amount = max(-1e38, min(amount, 1e38))
-                                    
-                                    # 预留字段
-                                    reserve = 0
-                                    
-                                    # 打包为二进制数据，格式：<IIIIIfII
-                                    record = pack('<IIIIIfII', 
-                                                date_int, open_price, high_price, low_price, 
-                                                close_price, amount, volume, reserve)
-                                    
-                                    # 写入文件
-                                    f.write(record)
-                                    new_records_count += 1
-                                except Exception as e:
-                                    print(f"  处理数据失败: {e}")
-                                    continue
                     
                     # 保存完整原始数据到CSV文件，不受通达信格式限制
                     csv_path = os.path.join(CSV_INDEX_PATH, f"{market_prefix}{code}.csv")

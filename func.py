@@ -34,12 +34,13 @@ def user_debug(print_str, print_value='', ):
 
 
 # 将通达信的日线文件转换成CSV格式保存函数。通达信数据文件32字节为一组。
-def day2csv(source_dir, file_name, target_dir):
+def day2csv(source_dir, file_name, target_dir, stock_name_map=None):
     """
     将通达信的日线文件转换成CSV格式保存函数。通达信数据文件32字节为一组
     :param source_dir: str 源文件路径
     :param file_name: str 文件名
     :param target_dir: str 要保存的路径
+    :param stock_name_map: dict 可选，股票代码到名称的映射字典
     :return: none
     """
     import os
@@ -62,10 +63,18 @@ def day2csv(source_dir, file_name, target_dir):
     target_path = target_dir + os.sep + file_name[2:-4] + '.csv'  # 目标文件包含文件名的路径
     # user_debug('target_path', target_path)
 
+    # 获取股票代码
+    stock_code = file_name[2:-4]
+    
+    # 获取股票名称
+    stock_name = ''
+    if stock_name_map and stock_code in stock_name_map:
+        stock_name = stock_name_map[stock_code]
+    
     if not os.path.isfile(target_path):
         # 目标文件不存在。写入表头行。begin从0开始转换
-        target_file = open(target_path, 'w', encoding="utf-8")  # 以覆盖写模式打开文件
-        header = str('date') + ',' + str('code') + ',' + str('open') + ',' + str('high') + ',' + str('low') + ',' \
+        target_file = open(target_path, 'w', encoding="gbk")  # 以覆盖写模式打开文件，使用GBK编码保持一致
+        header = str('date') + ',' + str('code') + ',' + str('name') + ',' + str('open') + ',' + str('high') + ',' + str('low') + ',' \
                  + str('close') + ',' + str('vol') + ',' + str('amount')
         target_file.write(header)
         begin = 0
@@ -100,8 +109,8 @@ def day2csv(source_dir, file_name, target_dir):
         if target_file_content is None:
             # 所有编码都尝试失败，重新创建文件
             print(f"无法读取文件{target_path}，将重新创建")
-            target_file = open(target_path, 'w', encoding="utf-8")  # 以覆盖写模式打开文件
-            header = str('date') + ',' + str('code') + ',' + str('open') + ',' + str('high') + ',' + str('low') + ',' \
+            target_file = open(target_path, 'w', encoding="gbk")  # 以覆盖写模式打开文件，使用GBK编码保持一致
+            header = str('date') + ',' + str('code') + ',' + str('name') + ',' + str('open') + ',' + str('high') + ',' + str('low') + ',' \
                      + str('close') + ',' + str('vol') + ',' + str('amount')
             target_file.write(header)
             target_file.close()
@@ -238,7 +247,8 @@ def day2csv(source_dir, file_name, target_dir):
         # 构建数据行，包含日期以便排序
         data_row = {
             'date': a_date,
-            'code': file_name[2:-4],
+            'code': stock_code,
+            'name': stock_name,
             'open': str(a[1] / 100.0),
             'high': str(a[2] / 100.0),
             'low': str(a[3] / 100.0),
@@ -280,13 +290,13 @@ def day2csv(source_dir, file_name, target_dir):
             print(f"无法读取文件{target_path}，将重新创建")
             try:
                 # 重新打开文件，写入排序后的数据
-                with open(target_path, 'w', encoding="utf-8") as target_file:  # 以覆盖写模式打开文件
-                    header = str('date') + ',' + str('code') + ',' + str('open') + ',' + str('high') + ',' + str('low') + ',' \
+                with open(target_path, 'w', encoding="gbk") as target_file:  # 以覆盖写模式打开文件，使用GBK编码保持一致
+                    header = str('date') + ',' + str('code') + ',' + str('name') + ',' + str('open') + ',' + str('high') + ',' + str('low') + ',' \
                              + str('close') + ',' + str('vol') + ',' + str('amount')
                     target_file.write(header)
                     # 写入排序后的数据
                     for row in data_rows:
-                        line = f"\n{row['date']},{row['code']},{row['open']},{row['high']},{row['low']},{row['close']},{row['vol']},{row['amount']}"
+                        line = f"\n{row['date']},{row['code']},{row['name']},{row['open']},{row['high']},{row['low']},{row['close']},{row['vol']},{row['amount']}"
                         target_file.write(line)
                 print(f"文件{target_path}已重新创建，写入了{len(data_rows)}条数据")
             except PermissionError as e:
@@ -298,6 +308,11 @@ def day2csv(source_dir, file_name, target_dir):
         if existing_content:
             # 保留表头
             header = existing_content[0].strip()
+            # 检查现有表头是否包含name列，如果不包含则添加
+            if 'name' not in header:
+                header = str('date') + ',' + str('code') + ',' + str('name') + ',' + str('open') + ',' + str('high') + ',' + str('low') + ',' \
+                         + str('close') + ',' + str('vol') + ',' + str('amount')
+            
             # 获取已有的日期列表，用于去重
             existing_dates = set()
             for line in existing_content[1:]:
@@ -318,7 +333,7 @@ def day2csv(source_dir, file_name, target_dir):
             
             # 重新打开文件，写入去重后的新数据
             try:
-                with open(target_path, 'w', encoding="utf-8") as target_file:
+                with open(target_path, 'w', encoding="gbk") as target_file:  # 使用GBK编码保持一致
                     target_file.write(header)
                     # 先写入已有的数据
                     for line in existing_content[1:]:
@@ -326,7 +341,7 @@ def day2csv(source_dir, file_name, target_dir):
                             target_file.write('\n' + line.strip())
                     # 再写入新数据
                     for row in new_data_rows:
-                        line = f"\n{row['date']},{row['code']},{row['open']},{row['high']},{row['low']},{row['close']},{row['vol']},{row['amount']}"
+                        line = f"\n{row['date']},{row['code']},{row['name']},{row['open']},{row['high']},{row['low']},{row['close']},{row['vol']},{row['amount']}"
                         target_file.write(line)
                 print(f"文件{target_path}已更新，添加了{len(new_data_rows)}条新数据")
             except PermissionError as e:
@@ -337,14 +352,14 @@ def day2csv(source_dir, file_name, target_dir):
         # 新建文件
         try:
             # 重新打开文件，写入排序后的数据
-            with open(target_path, 'w', encoding="utf-8") as target_file:  # 以覆盖写模式打开文件
-                header = str('date') + ',' + str('code') + ',' + str('open') + ',' + str('high') + ',' + str('low') + ',' \
+            with open(target_path, 'w', encoding="gbk") as target_file:  # 以覆盖写模式打开文件，使用GBK编码保持一致
+                header = str('date') + ',' + str('code') + ',' + str('name') + ',' + str('open') + ',' + str('high') + ',' + str('low') + ',' \
                          + str('close') + ',' + str('vol') + ',' + str('amount')
                 target_file.write(header)
                 
                 # 写入排序后的数据
                 for row in data_rows:
-                    line = f"\n{row['date']},{row['code']},{row['open']},{row['high']},{row['low']},{row['close']},{row['vol']},{row['amount']}"
+                    line = f"\n{row['date']},{row['code']},{row['name']},{row['open']},{row['high']},{row['low']},{row['close']},{row['vol']},{row['amount']}"
                     target_file.write(line)
             print(f"文件{target_path}已创建，写入了{len(data_rows)}条数据")
         except PermissionError as e:
@@ -708,16 +723,18 @@ def make_fq(code, df_code, df_gbbq, df_cw='', start_date='', end_date='', fqtype
     '''
 
     # 先进行判断。如果有adj列，且没有NaN值，表示此股票数据已处理完成，无需处理。直接返回原数据。
-    # 如果没有‘adj'列，表示没进行过复权处理，当作新股处理
+    # 如果没有'adj'列，表示没进行过复权处理，当作新股处理
     if 'adj' in df_code.columns.to_list():
         if True in df_code['adj'].isna().to_list():
             first_index = np.where(df_code.isna())[0][0]  # 有NaN值，设为第一个NaN值所在的行
         else:
             # 返回原数据，而不是空字符串，这样pkl文件会被更新
+            print(f"股票{code}已有完整adj列，直接返回原数据")
             return df_code
     else:
         first_index = 0
         flag_newstock = True
+        print(f"股票{code}没有adj列，设为新股模式")
 
     flag_attach = False  # True=追加数据模式  False=数据全部重新计算
     # 设置新股标志。True=新股，False=旧股。新股跳过追加数据部分的代码。如果没定义，默认为False
@@ -815,6 +832,11 @@ def make_fq(code, df_code, df_gbbq, df_cw='', start_date='', end_date='', fqtype
     if df_code['date'].duplicated().any():
         print(f"股票{code}存在重复日期，将去重")
         df_code = df_code.drop_duplicates(subset='date', keep='last')
+    
+    # 如果df_code为空，直接返回原始数据
+    if len(df_code) == 0:
+        print(f"股票{code}没有日线数据，跳过复权处理")
+        return pd.DataFrame()
     
     df_code.set_index('date', drop=True, inplace=True)
     df_code.insert(df_code.shape[1], 'if_trade', True)  # 插入if_trade列，赋值True
@@ -919,9 +941,17 @@ def make_fq(code, df_code, df_gbbq, df_cw='', start_date='', end_date='', fqtype
         data = data[:end_date]
     elif len(start_date) != 0 and len(end_date) != 0:
         data = data[start_date:end_date]
-    data.reset_index(drop=False, inplace=True)  # 重置索引行，数字索引，date列到第1列，保存为str '1991-01-01' 格式
-    # 最后调整列顺序
-    # data = data.reindex(columns=['code', 'date', 'open', 'high', 'low', 'close', 'vol', 'amount', 'adj', '流通股', '流通市值', '换手率'])
+    # 将索引恢复为date列
+    data.reset_index(drop=False, inplace=True)
+    # 重置行索引
+    data.reset_index(drop=True, inplace=True)
+    # 确保date列存在且为第一列
+    if 'date' in data.columns:
+        # 调整列顺序，确保date在第一列
+        cols = ['date', 'code', 'name', 'open', 'high', 'low', 'close', 'vol', 'amount', 'adj', '流通股', '流通市值', '换手率', '量比']
+        # 只保留data中存在的列
+        cols = [col for col in cols if col in data.columns]
+        data = data[cols]
     return data
 
 

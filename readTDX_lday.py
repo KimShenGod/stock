@@ -46,6 +46,21 @@ def check_files_exist():
 
 
 def update_lday():
+    # 使用akshare获取股票代码和名称的映射表
+    stock_name_map = {}
+    try:
+        import akshare as ak
+        print("正在获取股票代码和名称映射...")
+        stock_code_name_df = ak.stock_info_a_code_name()
+        if not stock_code_name_df.empty:
+            # 创建股票代码到名称的映射字典
+            stock_name_map = dict(zip(stock_code_name_df['code'], stock_code_name_df['name']))
+            print(f"成功获取 {len(stock_name_map)} 只股票的名称映射")
+        else:
+            print("akshare未返回数据，将使用空的股票名称映射")
+    except Exception as e:
+        print(f"获取股票名称映射失败: {e}，将使用空的股票名称映射")
+    
     # 读取通达信正常交易状态的股票列表。infoharbor_spec.cfg退市文件不齐全，放弃使用
     tdx_stocks_path = os.path.join(ucfg.tdx['tdx_path'], 'T0002', 'hq_cache', 'infoharbor_ex.code')
     tdx_stocks = pd.read_csv(tdx_stocks_path,
@@ -59,7 +74,7 @@ def update_lday():
         f = 'sz' + f + '.day'
         sz_file_path = os.path.join(sz_lday_path, f)
         if os.path.exists(sz_file_path):  # 处理深市sh00开头和创业板sh30文件，否则跳过此次循环
-            func.day2csv(sz_lday_path, f, ucfg.tdx['csv_lday'])
+            func.day2csv(sz_lday_path, f, ucfg.tdx['csv_lday'], stock_name_map)
 
     print("从通达信导出沪市股票数据")
     sh_lday_path = os.path.join(ucfg.tdx['tdx_path'], 'vipdoc', 'sh', 'lday')
@@ -68,38 +83,52 @@ def update_lday():
         f = 'sh' + f + '.day'
         sh_file_path = os.path.join(sh_lday_path, f)
         if os.path.exists(sh_file_path):
-            func.day2csv(sh_lday_path, f, ucfg.tdx['csv_lday'])
+            func.day2csv(sh_lday_path, f, ucfg.tdx['csv_lday'], stock_name_map)
 
     print("从通达信导出指数数据")
     sz_lday_path = os.path.join(ucfg.tdx['tdx_path'], 'vipdoc', 'sz', 'lday')
     sh_lday_path = os.path.join(ucfg.tdx['tdx_path'], 'vipdoc', 'sh', 'lday')
     for i in tqdm(ucfg.index_list):
         if 'sh' in i:
-            func.day2csv(sh_lday_path, i, ucfg.tdx['csv_index'])
+            func.day2csv(sh_lday_path, i, ucfg.tdx['csv_index'], stock_name_map)
         elif 'sz' in i:
-            func.day2csv(sz_lday_path, i, ucfg.tdx['csv_index'])
+            func.day2csv(sz_lday_path, i, ucfg.tdx['csv_index'], stock_name_map)
 
 
 def qfq(file_list, df_gbbq, cw_dict, tqdm_position=None):
     tq = tqdm(file_list, leave=False, position=tqdm_position)
     csv_lday_path = ucfg.tdx['csv_lday']
     pickle_path = ucfg.tdx['pickle']
+    failed_stocks = []
     
     for filename in tq:
-        # process_info = f'[{(file_list.index(filename) + 1):>4}/{str(len(file_list))}] {filename}'
-        csv_file_path = os.path.join(csv_lday_path, filename)
-        df_bfq = pd.read_csv(csv_file_path, index_col=None, encoding='gbk',
-                             dtype={'code': str})
-        df_qfq = func.make_fq(filename[:-4], df_bfq, df_gbbq, cw_dict)
-        # lefttime_tick = int((time.time() - starttime_tick) / (file_list.index(filename) + 1) * (len(file_list) - (file_list.index(filename) + 1)))
-        if isinstance(df_qfq, pd.DataFrame) and len(df_qfq) > 0:  # 返回值是DataFrame且行数大于0
-            # 写入csv和pkl文件，无论是否有更新
-            df_qfq.to_csv(csv_file_path, index=False, encoding='gbk')
-            pkl_file_path = os.path.join(pickle_path, filename[:-4] + '.pkl')
-            df_qfq.to_pickle(pkl_file_path)
-            tq.set_description(filename + "复权完成")
-        else:
-            tq.set_description(filename + "复权失败")
+        try:
+            # process_info = f'[{(file_list.index(filename) + 1):>4}/{str(len(file_list))}] {filename}'
+            csv_file_path = os.path.join(csv_lday_path, filename)
+            df_bfq = pd.read_csv(csv_file_path, index_col=None, encoding='gbk',
+                                 dtype={'code': str})
+            df_qfq = func.make_fq(filename[:-4], df_bfq, df_gbbq, cw_dict)
+            # lefttime_tick = int((time.time() - starttime_tick) / (file_list.index(filename) + 1) * (len(file_list) - (file_list.index(filename) + 1)))
+            if isinstance(df_qfq, pd.DataFrame) and len(df_qfq) > 0:  # 返回值是DataFrame且行数大于0
+                # 写入csv和pkl文件，无论是否有更新
+                df_qfq.to_csv(csv_file_path, index=False, encoding='gbk')
+                pkl_file_path = os.path.join(pickle_path, filename[:-4] + '.pkl')
+                df_qfq.to_pickle(pkl_file_path)
+                tq.set_description(filename + "复权完成")
+            else:
+                tq.set_description(filename + "复权失败")
+                failed_stocks.append(filename)
+        except Exception as e:
+            tq.set_description(filename + f"复权异常: {str(e)[:20]}")
+            failed_stocks.append(filename)
+    
+    if failed_stocks:
+        print(f"\n复权失败的股票数量: {len(failed_stocks)}")
+        print("失败列表:")
+        for stock in failed_stocks[:10]:
+            print(f"  {stock}")
+        if len(failed_stocks) > 10:
+            print(f"  ... 还有 {len(failed_stocks) - 10} 只股票失败")
         #     print(f'{process_info} 无需更新 已用{(time.time() - starttime_tick):.2f}秒 剩余预计{lefttime_tick}秒')
 
 

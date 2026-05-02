@@ -5,6 +5,16 @@
 GitHub主站：https://github.com/wkingnet/stock-analysis
 Gitee镜像：https://gitee.com/wkingnet/stock-analysis
 
+## 详细文档
+
+| 文档 | 说明 |
+|-----|-----|
+| [数据源配置](docs/数据源配置.md) | 本地通达信数据导出和网络数据获取配置 |
+| [策略系统](docs/策略系统.md) | 策略注册机制、内置策略列表、自定义策略开发 |
+| [选股功能](docs/选股功能.md) | 盘中选股和盘后选股使用方法 |
+| [策略回测](docs/策略回测.md) | 向量化回测引擎使用方法和结果分析 |
+| [config.yml详解](docs/config.yml详解.md) | 配置文件各参数详细说明 |
+
 ## 前言
 
 一切有为法，如梦幻泡影；如露亦如电，应作如是观。

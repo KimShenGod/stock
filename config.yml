@@ -80,3 +80,16 @@ strategies:
   
   # 示例组合3
   combo_3: ["今日涨停", "小市值"]
+
+# ============== 向量化回测配置 ==============
+backtest:
+  initial_capital: 400000
+  max_positions: 3
+  stop_loss: 0.08
+  take_profit: 0.30
+  max_hold_days: 30
+  commission_rate: 0.0003
+  stamp_tax_rate: 0.001
+  signal_dir: "./backtest_results/signals"
+  output_dir: "./backtest_results"
+  batch_days: 30

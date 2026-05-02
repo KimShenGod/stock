@@ -50,6 +50,14 @@ except ImportError as e:
     print("请安装akshare库: pip install akshare")
     sys.exit(1)
 
+# 导入chinese_calendar判断节假日
+try:
+    import chinese_calendar
+except ImportError as e:
+    print(f"chinese_calendar库导入失败: {e}")
+    print("请安装chinese_calendar库: pip install chinese_calendar")
+    sys.exit(1)
+
 # 配置通达信安装路径
 TDX_PATH = ucfg.tdx['tdx_path']
 VIPDOC_PATH = os.path.join(TDX_PATH, "vipdoc")
@@ -123,26 +131,49 @@ def is_trading_hours():
     return start_time <= now <= end_time
 
 # 获取应该更新到的目标日期
+def is_trading_day(date):
+    """
+    检查指定日期是否是交易日
+    - 周六、周日返回False
+    - 法定节假日返回False（使用chinese_calendar库）
+    - 调休工作日返回True
+    - 正常工作日返回True
+    """
+    try:
+        return chinese_calendar.is_workday(date)
+    except Exception:
+        # 日期超出chinese_calendar覆盖范围时，回退到周末检查
+        if date.weekday() >= 5:
+            return False
+        return True
+
+def get_previous_trading_day(date):
+    """
+    获取指定日期之前的最近交易日
+    """
+    prev_day = date - datetime.timedelta(days=1)
+    while not is_trading_day(prev_day):
+        prev_day = prev_day - datetime.timedelta(days=1)
+    return prev_day
+
 def get_target_date():
     """
     根据当前时间获取应该更新到的目标日期
     - 如果在交易时间内（9:00-17:00），返回前一个交易日
-    - 如果在交易时间外，返回当前日期
+    - 如果在交易时间外，返回当前日期（如果是非交易日则往前找最近交易日）
     """
     today = datetime.datetime.today()
-    
+
     if is_trading_hours():
         # 在交易时间内，返回前一个交易日
-        yesterday = today - datetime.timedelta(days=1)
-        # 如果昨天是周末，返回上周五
-        if yesterday.weekday() == 5:  # 周六
-            yesterday = yesterday - datetime.timedelta(days=1)
-        elif yesterday.weekday() == 6:  # 周日
-            yesterday = yesterday - datetime.timedelta(days=2)
-        return yesterday.strftime("%Y%m%d")
+        return get_previous_trading_day(today).strftime("%Y%m%d")
     else:
         # 在交易时间外，返回当前日期
-        return today.strftime("%Y%m%d")
+        # 如果今天不是交易日，往前找最近交易日
+        if is_trading_day(today):
+            return today.strftime("%Y%m%d")
+        else:
+            return get_previous_trading_day(today).strftime("%Y%m%d")
 
 # 读取最佳IP配置
 
@@ -326,68 +357,120 @@ def download_latest_data():
         batch_size = 100
         total_batches = (len(stock_list) + batch_size - 1) // batch_size
         
-        # 快速检测：检查前2个批次的day文件最新日期是否都等于目标日期
-        quick_check_batches = 2
+        # 快速检测：分别从sz和sh市场各取一批股票检测
+        # 90%以上股票已更新（含停牌）则认为数据已最新，跳过全量下载
         quick_check_passed = False
-        
-        # 统计已存在的day文件数量
-        existing_file_count = 0
-        for market_prefix, code in stock_list[:quick_check_batches * batch_size]:
-            if code.startswith('688'):
-                continue
-            target_file = os.path.join(VIPDOC_PATH, market_prefix, 'lday', f"{market_prefix}{code}.day")
-            if os.path.exists(target_file):
-                existing_file_count += 1
-        
-        if existing_file_count > 0 and total_batches >= quick_check_batches:
+        quick_check_sample_size = 100  # 每个市场检测的股票数量
+
+        # 分别筛选sz和sh市场的A股股票（排除科创板688）
+        sz_stocks = [(m, c) for m, c in stock_list if m == 'sz'
+                     and (c.startswith('000') or c.startswith('001') or c.startswith('002')
+                          or c.startswith('300') or c.startswith('301') or c.startswith('302'))]
+        sh_stocks = [(m, c) for m, c in stock_list if m == 'sh'
+                     and (c.startswith('600') or c.startswith('601') or c.startswith('603') or c.startswith('605'))]
+
+        # 取样本
+        sz_sample = sz_stocks[:quick_check_sample_size]
+        sh_sample = sh_stocks[:quick_check_sample_size]
+        total_sample = len(sz_sample) + len(sh_sample)
+
+        if total_sample > 0:
             print(f"\n=== 开始快速检测 ===")
-            print(f"前{quick_check_batches}个批次中共有{existing_file_count}只股票有已存在的day文件")
-            all_up_to_date = True
-            checked_count = 0
-            
-            for check_batch_idx in range(quick_check_batches):
-                start_idx = check_batch_idx * batch_size
-                end_idx = min((check_batch_idx + 1) * batch_size, len(stock_list))
-                batch = stock_list[start_idx:end_idx]
-                
-                for market_prefix, code in batch:
-                    if code.startswith('688'):
-                        continue
-                    
-                    target_file = os.path.join(VIPDOC_PATH, market_prefix, 'lday', f"{market_prefix}{code}.day")
-                    if os.path.exists(target_file):
-                        try:
-                            with open(target_file, 'rb') as f:
-                                f.seek(0, 2)
-                                file_size = f.tell()
-                                if file_size >= 32:
-                                    f.seek(-32, 2)
-                                    last_record = f.read(32)
-                                    from struct import unpack
-                                    date = unpack('<IIIIIfII', last_record)[0]
-                                    if 19900101 <= date <= 20301231:
-                                        if date != target_date_int:
-                                            print(f"  发现{market_prefix}{code}的最新日期为{date}，目标日期为{target_date_int}")
-                                            all_up_to_date = False
-                                            break
-                                    checked_count += 1
-                        except Exception as e:
-                            print(f"  读取{market_prefix}{code}的day文件失败: {e}")
-                if not all_up_to_date:
-                    break
-            
-            if all_up_to_date and checked_count > 0:
-                print(f"快速检测完成：前{quick_check_batches}个批次({checked_count}只股票)的day文件最新日期均为{target_date_int}")
-                print(f"判定所有股票日线数据已是最新，跳过个股日线更新")
+            print(f"检测样本：sz市场{len(sz_sample)}只，sh市场{len(sh_sample)}只，共{total_sample}只")
+
+            up_to_date_count = 0
+            suspended_count = 0
+            stale_count = 0
+            missing_count = 0
+
+            # 检测函数
+            def check_stock(market_prefix, code):
+                nonlocal up_to_date_count, suspended_count, stale_count, missing_count
+                target_file = os.path.join(VIPDOC_PATH, market_prefix, 'lday', f"{market_prefix}{code}.day")
+
+                if not os.path.exists(target_file):
+                    # 文件不存在，需要下载
+                    missing_count += 1
+                    return
+
+                try:
+                    with open(target_file, 'rb') as f:
+                        f.seek(0, 2)
+                        file_size = f.tell()
+                        if file_size < 32:
+                            # 文件太小（可能是0KB bug残留），需要重新下载
+                            missing_count += 1
+                            return
+                        f.seek(-32, 2)
+                        last_record = f.read(32)
+                        from struct import unpack
+                        date = unpack('<IIIIIfII', last_record)[0]
+                        if not (19900101 <= date <= 20301231):
+                            # 日期无效，需要重新下载
+                            missing_count += 1
+                            return
+
+                        if date == target_date_int:
+                            up_to_date_count += 1
+                        else:
+                            # 日期不等于目标日期，通过API查询判断是否停牌
+                            market = 1 if market_prefix == 'sh' else 0
+                            try:
+                                data = api.get_security_bars(9, market, code, 0, 1)
+                                if data and len(data) > 0:
+                                    k_line = data[0]
+                                    if 'datetime' in k_line:
+                                        api_date_str = k_line['datetime'].split(' ')[0]
+                                        api_date_int = int(api_date_str.replace('-', ''))
+                                    else:
+                                        api_date_int = k_line.get('year', 0) * 10000 + k_line.get('month', 0) * 100 + k_line.get('day', 0)
+
+                                    if api_date_int <= date:
+                                        # API返回的最新数据不晚于文件最新日期，说明股票已停牌
+                                        suspended_count += 1
+                                    else:
+                                        # API有更新的数据，确实需要更新
+                                        stale_count += 1
+                                else:
+                                    # API无数据，可能已退市，视为停牌
+                                    suspended_count += 1
+                            except Exception:
+                                # API查询失败，保守认为需要更新
+                                stale_count += 1
+                except Exception as e:
+                    # 文件读取失败，需要重新下载
+                    missing_count += 1
+
+            # 检测sz市场样本
+            print("  检测sz市场样本...")
+            for market_prefix, code in sz_sample:
+                check_stock(market_prefix, code)
+
+            # 检测sh市场样本
+            print("  检测sh市场样本...")
+            for market_prefix, code in sh_sample:
+                check_stock(market_prefix, code)
+
+            # 计算更新比例（相对于总样本数）
+            checked_count = up_to_date_count + suspended_count + stale_count + missing_count
+            updated_ratio = (up_to_date_count + suspended_count) / total_sample * 100
+            need_update_count = stale_count + missing_count
+
+            print(f"快速检测完成：")
+            print(f"  已最新：{up_to_date_count}只")
+            print(f"  停牌/退市：{suspended_count}只")
+            print(f"  待更新：{stale_count}只")
+            print(f"  缺失文件：{missing_count}只")
+            print(f"  更新比例：{updated_ratio:.1f}%（已最新+停牌 / 总样本{total_sample}只）")
+
+            if updated_ratio >= 90:
+                print(f"更新比例>=90%，判定数据已是最新，跳过个股日线更新")
                 quick_check_passed = True
             else:
-                if checked_count == 0:
-                    print(f"快速检测完成：前{quick_check_batches}个批次中没有找到可读取的day文件，继续处理所有批次")
-                else:
-                    print(f"快速检测完成：发现{checked_count}只股票中有日期不等于{target_date_int}的，继续处理所有批次")
+                print(f"更新比例<90%，有{need_update_count}只股票需要处理，继续处理所有批次")
         else:
             print(f"\n=== 快速检测跳过 ===")
-            print(f"前{quick_check_batches}个批次中只有{existing_file_count}只股票有已存在的day文件，跳过快速检测")
+            print(f"股票列表为空，无法进行快速检测，继续处理所有批次")
         
         if not quick_check_passed:
             for batch_idx in range(total_batches):
@@ -717,39 +800,20 @@ def download_latest_data():
                                         print(f"  删除并重新创建文件失败: {e2}，将跳过该文件")
                                         continue
                         else:
-                            # 新文件：直接写入，保持API返回的从新到旧顺序
-                            mode = 'wb'
-                            from struct import pack
-                            with open(target_file, mode) as f:
-                                for k_line in all_data:
-                                    # 解析日期
-                                    date_int = k_line['sort_date']
-                                    
-                                    # 价格转换（实际价格×100）
-                                    open_price = int(k_line.get('open', 0) * 100)
-                                    high_price = int(k_line.get('high', 0) * 100)
-                                    low_price = int(k_line.get('low', 0) * 100)
-                                    close_price = int(k_line.get('close', 0) * 100)
-                                    
-                                    # 成交量和成交额
-                                    volume = int(k_line.get('vol', 0))
-                                    amount = k_line.get('amount', 0)
-                                    
-                                    # 预留字段
-                                    reserve = 0
-                                    
-                                    # 打包为二进制数据，格式：<IIIIIfII
-                                    record = pack('<IIIIIfII', 
-                                                date_int, open_price, high_price, low_price, 
-                                                close_price, amount, volume, reserve)
-                                    f.write(record)
-                        
-                        # 输出下载信息
-                        operation = '下载' if mode == 'wb' else '追加'
-                        print(f"  成功{operation} {market_prefix}{code} 的日线数据，共 {len(all_data)} 条")
-                        
-                        updated_count += 1
-                        success_count += 1
+                            # 没有新数据需要写入
+                            if file_exists:
+                                # 文件已存在，没有新数据，保留原文件，跳过
+                                print(f"  {market_prefix}{code} 没有新数据，跳过")
+                                success_count += 1
+                            # else: 新文件且没有数据，不创建空文件，静默跳过
+
+                        # 输出下载信息（仅当有数据写入时）
+                        if has_new_data and all_data:
+                            operation = '下载' if mode == 'wb' else '追加'
+                            print(f"  成功{operation} {market_prefix}{code} 的日线数据，共 {len(all_data)} 条")
+
+                            updated_count += 1
+                            success_count += 1
                     except Exception as e:
                         fail_count += 1
                         # 打印失败信息
@@ -781,61 +845,71 @@ def download_latest_data():
         
         # 下载指数数据
         print("\n正在下载指数数据...")
-        
-        # 使用Baostock获取指数数据
-        print("  使用Baostock获取指数数据")
-        bs.login_result = bs.login()
-        if bs.login_result.error_code != '0':
-            print(f"  Baostock登录失败: {bs.login_result.error_msg}")
-            print("  无法获取指数数据，请检查网络连接或稍后重试")
-            return
-        else:
-            print("  Baostock登录成功")
-        
+
+        # 尝试使用Baostock获取指数数据（带重试）
+        baostock_connected = False
+        max_retries = 3
+        retry_delay = 2
+
+        for retry in range(max_retries):
+            try:
+                print(f"  尝试连接Baostock（第{retry + 1}次）...")
+                bs.login_result = bs.login()
+                if bs.login_result.error_code == '0':
+                    baostock_connected = True
+                    print("  Baostock登录成功")
+                    break
+                else:
+                    print(f"  Baostock登录失败: {bs.login_result.error_msg}")
+                    if retry < max_retries - 1:
+                        print(f"  等待{retry_delay}秒后重试...")
+                        time.sleep(retry_delay)
+            except Exception as e:
+                print(f"  Baostock连接异常: {e}")
+                if retry < max_retries - 1:
+                    print(f"  等待{retry_delay}秒后重试...")
+                    time.sleep(retry_delay)
+
+        if not baostock_connected:
+            print("  Baostock连接失败，无法获取指数数据，请检查网络连接或稍后重试")
+            print(f"指数数据下载完成，成功: 0 个，更新: 0 个，失败: 4 个")
+            return True  # 返回True继续执行后续流程
+
         indices = [
             ('sh', '000001'),  # 上证指数
             ('sh', '000300'),  # 沪深300
             ('sz', '399001'),  # 深成指
             ('sz', '399006')   # 创业板指
         ]
-        
+
         index_success = 0
         index_updated = 0
         index_fail = 0
-        
+
         for market_prefix, code in indices:
             try:
                 print(f"  尝试获取指数 {market_prefix}{code} 的日线数据")
-                
+
                 # 构建目标文件路径
                 data_path = os.path.join(VIPDOC_PATH, market_prefix, 'lday')
                 ensure_dir(data_path)
                 target_file = os.path.join(data_path, f"{market_prefix}{code}.day")
-                
+
                 # 指数数据采用全量下载模式
                 file_exists = os.path.exists(target_file)
                 if file_exists:
                     print(f"  检测到现有文件，将进行全量更新覆盖")
                 else:
                     print(f"  未检测到现有文件，将下载全部历史数据")
-                
-                # 设置开始日期
+
+                # 设置日期参数
                 start_date = "1990-01-01"
-                
-                # 设置结束日期为目标日期的YYYY-MM-DD格式
                 end_date = datetime.datetime.strptime(str(target_date_int), "%Y%m%d").strftime("%Y-%m-%d")
-                
-                # 处理返回结果
-                all_data = []
-                max_date = None
-                total_rows = 0
-                processed_rows = 0
-                
-                # 使用Baostock获取指数数据（优先）
+
+                # 使用Baostock获取指数数据
                 baostock_code = f"{market_prefix}.{code}"
-                print(f"  使用Baostock获取指数 {market_prefix}{code} 的数据")
-                print(f"  Baostock API调用参数: code={baostock_code}, start_date={start_date}, end_date={end_date}")
-                
+                print(f"  使用Baostock获取指数数据，参数: code={baostock_code}, start_date={start_date}, end_date={end_date}")
+
                 rs = bs.query_history_k_data_plus(
                     baostock_code,
                     "date,open,high,low,close,volume,amount",
@@ -844,20 +918,24 @@ def download_latest_data():
                     frequency="d",
                     adjustflag="3"  # 3：不复权
                 )
-                
+
+                # 处理返回结果
+                all_data = []
+                max_date = None
+                total_rows = 0
+
                 while (rs.error_code == '0') & rs.next():
                     total_rows += 1
                     row = rs.get_row_data()
                     date_str = row[0]
                     date_int = int(date_str.replace('-', ''))
-                    
+
                     if max_date is None or date_int > max_date:
                         max_date = date_int
-                    
+
                     if date_int > target_date_int:
                         continue
-                    
-                    processed_rows += 1
+
                     try:
                         open_price = float(row[1]) if row[1] != '' else 0.0
                         high_price = float(row[2]) if row[2] != '' else 0.0
@@ -865,7 +943,7 @@ def download_latest_data():
                         close_price = float(row[4]) if row[4] != '' else 0.0
                         volume = float(row[5]) if row[5] != '' else 0.0
                         amount = float(row[6]) if row[6] != '' else 0.0
-                        
+
                         all_data.append({
                             'datetime': f"{date_str} 00:00:00",
                             'sort_date': date_int,
@@ -880,23 +958,14 @@ def download_latest_data():
                         print(f"  跳过无效数据行: {e}, 行数据: {row}")
                         continue
 
-                print(f"  Baostock返回总行数: {total_rows}, 处理后行数: {processed_rows}, 最大日期: {max_date}, 目标日期: {target_date_int}")
-                
-                # 如果有数据，按照日期从旧到新排序
-                if all_data:
-                    all_data.sort(key=lambda x: x['sort_date'])
-                    print(f"  排序后数据范围: {all_data[0]['sort_date']} 到 {all_data[-1]['sort_date']}")
-                    has_new_data = True
-                else:
-                    print(f"  没有新数据需要更新")
-                    has_new_data = False
-                    
-                # 检查Baostock返回的最大日期是否小于目标日期
+                print(f"  Baostock返回{total_rows}行数据，处理后{len(all_data)}行，最大日期: {max_date}")
+
+                # 检查最大日期是否小于目标日期
                 if max_date and max_date < target_date_int:
-                    print(f"  注意: Baostock只返回了截至 {max_date} 的数据，而目标日期是 {target_date_int}")
+                    print(f"  注意: 数据源只返回了截至 {max_date} 的数据，而目标日期是 {target_date_int}")
                     print(f"  这可能是因为 {target_date_int} 是非交易日或数据尚未更新")
-                
-                if has_new_data and all_data:
+
+                if all_data:
                     # 指数数据采用全量覆盖模式
                     mode = 'wb'
                     new_records_count = 0
@@ -993,9 +1062,10 @@ def download_latest_data():
                 index_fail += 1
                 continue
         
-        # 登出Baostock
-        bs.logout()
-        
+        # 登出Baostock（仅在成功连接时）
+        if baostock_connected:
+            bs.logout()
+
         print(f"指数数据下载完成，成功: {index_success} 个，更新: {index_updated} 个，失败: {index_fail} 个")
         
         return True

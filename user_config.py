@@ -11,12 +11,12 @@ debug = False  # 是否开启调试日志输出  开=True  关=False
 
 # 目录最好事先手动建立好，不然程序会出错
 tdx = {
-    'tdx_path': 'e:/Program Files/new_dfcf_v6',  # 指定通达信目录
-    'csv_lday': 'TDXdata/lday_qfq',  # 指定csv格式日线数据保存目录
-    'pickle': 'TDXdata/pickle',  # 指定pickle格式日线数据保存目录
-    'csv_index': 'TDXdata/index',  # 指定指数保存目录
-    'csv_cw': 'TDXdata/cw',  # 指定专业财务保存目录
-    'csv_gbbq': 'TDXdata',  # 指定股本变迁保存目录
+    'tdx_path': 'c:/new_tdx64',  # 指定通达信目录
+    'csv_lday': 'D:/work/project/python/stock/sourcecode/stock-analysis-master/TDXdata/lday_qfq',  # 指定csv格式日线数据保存目录
+    'pickle': 'D:/work/project/python/stock/sourcecode/stock-analysis-master/TDXdata/pickle',  # 指定pickle格式日线数据保存目录
+    'csv_index': 'D:/work/project/python/stock/sourcecode/stock-analysis-master/TDXdata/index',  # 指定指数保存目录
+    'csv_cw': 'D:/work/project/python/stock/sourcecode/stock-analysis-master/TDXdata/cw',  # 指定专业财务保存目录
+    'csv_gbbq': 'D:/work/project/python/stock/sourcecode/stock-analysis-master/TDXdata',  # 指定股本变迁保存目录
     'pytdx_ip': '218.6.170.55',  # 指定pytdx的通达信服务器IP
     'pytdx_port': 7709,  # 指定pytdx的通达信服务器端口。int类型
 }

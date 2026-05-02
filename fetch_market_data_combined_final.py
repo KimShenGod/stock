@@ -49,13 +49,26 @@ except ImportError as e:
     print("Please install akshare: pip install akshare")
     sys.exit(1)
 
-# Local data storage path
-LOCAL_DATA_PATH = "TDXdata"
-CSV_LDAY_PATH = os.path.join(LOCAL_DATA_PATH, "lday_qfq")
-PICKLE_PATH = os.path.join(LOCAL_DATA_PATH, "pickle")
-CSV_INDEX_PATH = os.path.join(LOCAL_DATA_PATH, "index")
-CSV_CW_PATH = os.path.join(LOCAL_DATA_PATH, "cw")
-CSV_GBBQ_PATH = LOCAL_DATA_PATH
+# Import user configuration
+try:
+    import user_config as ucfg
+    # Use paths from user_config
+    CSV_LDAY_PATH = ucfg.tdx.get('csv_lday', 'TDXdata/lday_qfq')
+    PICKLE_PATH = ucfg.tdx.get('pickle', 'TDXdata/pickle')
+    CSV_INDEX_PATH = ucfg.tdx.get('csv_index', 'TDXdata/index')
+    CSV_CW_PATH = ucfg.tdx.get('csv_cw', 'TDXdata/cw')
+    CSV_GBBQ_PATH = ucfg.tdx.get('csv_gbbq', 'TDXdata')
+    LOCAL_DATA_PATH = CSV_GBBQ_PATH
+    print(f"Using user_config data path: {PICKLE_PATH}")
+except ImportError:
+    # If user_config is not available, use default paths
+    print("user_config.py not found, using default data paths")
+    LOCAL_DATA_PATH = "TDXdata"
+    CSV_LDAY_PATH = os.path.join(LOCAL_DATA_PATH, "lday_qfq")
+    PICKLE_PATH = os.path.join(LOCAL_DATA_PATH, "pickle")
+    CSV_INDEX_PATH = os.path.join(LOCAL_DATA_PATH, "index")
+    CSV_CW_PATH = os.path.join(LOCAL_DATA_PATH, "cw")
+    CSV_GBBQ_PATH = LOCAL_DATA_PATH
 
 # Simulated TDX data directory structure (for possible future TDX client use)
 SIMULATED_TDX_PATH = os.path.join(LOCAL_DATA_PATH, "simulated_tdx")

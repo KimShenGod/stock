@@ -49,18 +49,31 @@ except ImportError as e:
     print("请安装akshare库: pip install akshare")
     sys.exit(1)
 
-# 本地数据保存路径
-LOCAL_DATA_PATH = "TDXdata"
-# 模拟的通达信数据目录结构（不需要实际安装通达信）
+# 导入用户配置
+try:
+    import user_config as ucfg
+    # 使用 user_config 中的路径配置
+    CSV_LDAY_PATH = ucfg.tdx.get('csv_lday', 'TDXdata/lday_qfq')
+    PICKLE_PATH = ucfg.tdx.get('pickle', 'TDXdata/pickle')
+    CSV_INDEX_PATH = ucfg.tdx.get('csv_index', 'TDXdata/index')
+    CSV_CW_PATH = ucfg.tdx.get('csv_cw', 'TDXdata/cw')
+    CSV_GBBQ_PATH = ucfg.tdx.get('csv_gbbq', 'TDXdata')
+    LOCAL_DATA_PATH = CSV_GBBQ_PATH
+    print(f"使用 user_config 数据路径: {PICKLE_PATH}")
+except ImportError:
+    # 如果 user_config 不可用，使用默认路径
+    print("user_config.py 未找到，使用默认数据路径")
+    LOCAL_DATA_PATH = "TDXdata"
+    CSV_LDAY_PATH = os.path.join(LOCAL_DATA_PATH, "lday_qfq")
+    PICKLE_PATH = os.path.join(LOCAL_DATA_PATH, "pickle")
+    CSV_INDEX_PATH = os.path.join(LOCAL_DATA_PATH, "index")
+    CSV_CW_PATH = os.path.join(LOCAL_DATA_PATH, "cw")
+    CSV_GBBQ_PATH = LOCAL_DATA_PATH
+
+# 模拟的通达信数据目录结构（用于模拟TDX客户端，可选）
 SIMULATED_TDX_PATH = os.path.join(LOCAL_DATA_PATH, "simulated_tdx")
 VIPDOC_PATH = os.path.join(SIMULATED_TDX_PATH, "vipdoc")
 HQ_CACHE_PATH = os.path.join(SIMULATED_TDX_PATH, "T0002", "hq_cache")
-
-CSV_LDAY_PATH = os.path.join(SIMULATED_TDX_PATH, "lday_qfq")
-PICKLE_PATH = os.path.join(SIMULATED_TDX_PATH, "pickle")
-CSV_INDEX_PATH = os.path.join(SIMULATED_TDX_PATH, "index")
-CSV_CW_PATH = os.path.join(SIMULATED_TDX_PATH, "cw")
-CSV_GBBQ_PATH = os.path.join(SIMULATED_TDX_PATH, "gbbq")
 
 
 

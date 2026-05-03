@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "pdf-converter": {
+      "source": "tanis90/pdf-converter-mineru",
+      "sourceType": "github",
+      "skillPath": "SKILL.md",
+      "computedHash": "5edd3065b577805b29356aec1889e95850ed17cf56f52419a49401c50b3a2ab2"
+    }
+  }
+}

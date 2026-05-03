@@ -83,12 +83,16 @@ def quick_backtest(
         回测结果字典
     """
     import os
+    import yaml
     from pathlib import Path
 
     if signal_dir is None:
         signal_dir = str(Path(output_dir) / 'signals')
 
     Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+    # 获取策略组合对应的策略列表
+    strategy_names = _get_strategy_names(strategy_combo)
 
     strategy_config = StreamingStrategyConfig(
         initial_capital=initial_capital,
@@ -97,6 +101,54 @@ def quick_backtest(
         stop_profit_pct=take_profit,
         max_hold_days=max_hold_days,
     )
+
+    # 检查信号是否需要重新计算
+    signal_config_path = Path(signal_dir) / 'signal_config.pkl'
+    need_recalculate = True
+
+    if signal_config_path.exists():
+        try:
+            import pickle
+            with open(signal_config_path, 'rb') as f:
+                saved_cfg = pickle.load(f)
+            saved_strategies = saved_cfg.get('strategy_names', [])
+            if set(saved_strategies) == set(strategy_names):
+                need_recalculate = False
+        except Exception:
+            pass
+
+    # 如果需要重新计算信号
+    if need_recalculate:
+        from backtest.signal_calculator import SignalCalculator, SignalConfig
+        from backtest.local_data_loader import get_stock_list
+
+        try:
+            import user_config as ucfg
+            data_dir = ucfg.tdx.get('pickle', None)
+        except ImportError:
+            data_dir = None
+
+        symbols = get_stock_list(data_dir=data_dir)
+        if not symbols:
+            return {'error': '无法获取股票列表', 'success': False}
+
+        calc_config = SignalConfig(
+            start_date=start_date,
+            end_date=end_date,
+            lookback_days=120,
+            batch_size=100,
+        )
+
+        calculator = SignalCalculator(
+            data_dir=data_dir,
+            output_dir=signal_dir,
+        )
+
+        calculator.calculate_and_save_batch(
+            symbols=symbols,
+            config=calc_config,
+            strategy_names=strategy_names,
+        )
 
     if use_vectorized and check_vectorized_support():
         # 获取数据路径
@@ -142,6 +194,26 @@ def quick_backtest(
         )
 
     return result
+
+
+def _get_strategy_names(combo_name: str) -> list:
+    """从config.yml获取策略组合的策略列表"""
+    import yaml
+    from pathlib import Path
+
+    config_path = Path(__file__).parent.parent / 'config.yml'
+    if config_path.exists():
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                cfg = yaml.safe_load(f)
+            strategies = cfg.get('strategies', {})
+            if combo_name in strategies:
+                return strategies[combo_name]
+        except Exception:
+            pass
+
+    # 默认策略
+    return ['周线MACD区间', '小市值']
 
 
 __all__ = [

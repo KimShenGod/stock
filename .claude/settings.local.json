@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mineru-open-api flash-extract *)",
+      "Bash(pip show *)",
+      "mcp__plugin_everything-claude-code_exa__web_search_exa",
+      "WebFetch(domain:)",
+      "mcp__plugin_everything-claude-code_sequential-thinking__sequentialthinking",
+      "Bash(mkdir -p \"C:/Users/shen/.claude/plans\")",
+      "Bash(touch \"C:/Users/shen/.claude/plans/replicated-mapping-star-agent-a8aca90314e276f16.md\")",
+      "Bash(python -c ' *)"
+    ]
+  }
+}

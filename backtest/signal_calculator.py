@@ -75,7 +75,7 @@ def calculate_registered_strategy_signals(
         # 调用策略函数
         # 策略签名: func(df, start_date='', end_date='', mode=None) -> bool | pd.Series
         try:
-            result = strategy_func(df, config.start_date, config.end_date)
+            result = strategy_func(df, config.start_date, config.end_date, mode='backtest')
         except Exception as e:
             logger.debug(f"策略 {strategy_name} 执行失败: {e}")
             return None
@@ -249,6 +249,11 @@ class SignalCalculator:
         """
         if strategy_names is None:
             strategy_names = list(SIGNAL_CALCULATORS.keys())
+
+        # 清空旧的信号文件
+        for old_file in self.output_dir.glob('signals_batch_*.pkl'):
+            old_file.unlink()
+            logger.info(f"删除旧信号文件: {old_file}")
 
         total = len(symbols)
         n_batches = (total + batch_size - 1) // batch_size
